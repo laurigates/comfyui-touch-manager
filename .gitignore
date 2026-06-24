@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.egg-info/
+.eggs/
+.venv/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+coverage/
+
+# Built frontend output — emitted by `bun run build`, force-shipped to the
+# Comfy Registry via [tool.comfy] includes in pyproject.toml.
+web/dist/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local notes / scratch
+TODO.local.md
+NOTES.local.md

@@ -1,145 +1,115 @@
-// Touch Node Manager — ComfyUI frontend extension.
+// Touch Node Manager — ComfyUI frontend extension entry point.
 //
 // TypeScript source in `src/`, built to ESM via `bun build` and emitted to
-// `web/dist/` (served at /extensions/comfyui-touch-manager/index.js — the pack directory
-// name IS the URL segment). Do not rename the pack dir without syncing
-// EXT_NAME below (used for log prefixes and any /touch_manager/ fetches).
-// See ADR-0001.
+// `web/dist/` (served at /extensions/comfyui-touch-manager/index.js — the pack
+// directory name IS the URL segment). Do not rename the pack dir without
+// syncing EXT_NAME / the /touch_manager/ route namespace. See ADR-0001.
 //
-// Pattern (shared with gallery-loader / sampler-info / touch-numeric):
-//   registerExtension -> enhance each node (on create AND on graph load) ->
-//   wrap widget.onPointerDown on widgets matched BY NAME -> open an HTML
-//   modal instead of the native LiteGraph control. Additive + mobile-first;
-//   always chain to the original handler and fall back to the native control.
-//   Requires the modern Vue frontend's onPointerDown hook
-//   (comfyui-frontend-package >= 1.40).
+// This pack is a NODE MANAGER, not a widget interceptor. It opens a
+// full-screen, touch-first modal (tabs: Installed / Updates / Install-from-URL
+// / Core) that drives the /touch_manager/* backend routes. The modal itself
+// lives in touch-manager-ui.ts; the pure helpers in manager-core.ts. This file
+// is thin: it only registers the extension and wires the open entry points.
 //
-// The shared modal primitives come from @laurigates/comfy-modal-kit. They are NOT copied
-// into this pack — `bun build` INLINES the imported code into web/dist. To add
-// fuzzy search to the modal, import the matcher from the same package:
-//   import { fuzzyRank, highlightMatches } from "@laurigates/comfy-modal-kit";
-//   fuzzyRank(query, [primaryField, ...otherFields]) -> { score, primaryMatches } | null
-import { openModalShell } from "@laurigates/comfy-modal-kit";
-// ComfyUI serves its frontend API at runtime from `/scripts/app.js`. The
-// emitted import string stays `/scripts/app.js` (bun's `--external '/scripts/*'`
-// keeps it unbundled); the type is supplied via a `paths` mapping in
-// tsconfig.json that points the import at `src/comfyui-shims.d.ts`. See ADR-0001.
+// The shared modal primitives come from @laurigates/comfy-modal-kit and are
+// INLINED by `bun build` — not copied into this pack.
 import { app } from "/scripts/app.js";
+import { openManager } from "./touch-manager-ui";
 
 const EXT_NAME = "comfyui-touch-manager";
+const OPEN_COMMAND_ID = "TouchManager.Open";
 
-// Widgets this pack enhances, detected by NAME (generic across node packs).
-// TODO: tune this set for the pack.
-const TARGET_WIDGETS = new Set<string>([]);
-
-// ============================================================
-// Types — the narrow LiteGraph surface this pack reaches into
-// ============================================================
-//
-// `@comfyorg/comfyui-frontend-types` exports `ComfyApp` (the type of the
-// imported `app`) but NOT `LGraphNode` / the widget interfaces — they are
-// declared internally and not re-exported. Model the small surface this pack
-// touches with local structural interfaces instead (narrow blast radius).
-
-// A widget plus the custom props this pack hangs off it. `onPointerDown` and
-// the private guard flag are this pack's intercept seam, not part of the
-// public widget surface.
-interface PatchedWidget {
-  name: string;
-  onPointerDown?: (pointer: unknown, node: PatchedNode, canvas: unknown) => boolean | undefined;
-  _touchManagerPatched?: boolean;
-}
-
-// Minimal structural type for the LiteGraph node this pack operates on. Named
-// to avoid colliding with the package's own un-exported `LGraphNode` at the
-// registerExtension lifecycle-hook seam — the hooks receive the package node,
-// which we cast to this structural shape.
-interface PatchedNode {
-  type?: string;
-  widgets?: PatchedWidget[];
-}
-
-// ============================================================
-// Modal
-// ============================================================
-
-function openPicker(widget: PatchedWidget, node: PatchedNode | null): void {
-  // CONTRACT: openModalShell has NO `body` option — it returns a controller
-  // ({ bodyEl, close, setBusy, setStatus, ... }) with an EMPTY bodyEl that you
-  // fill AFTER opening. Passing `body:` is silently ignored and the dialog
-  // renders empty (a bug that passes green unit tests — only a jsdom/browser
-  // check catches it). Always: open, then modal.bodyEl.appendChild(...).
-  const modal = openModalShell({
-    title: widget.name,
-    onClose: () => {},
-  });
-
-  // TODO: build the real modal body. This skeleton proves the interception
-  // + modal-shell wiring works end to end. Use fuzzyRank for search.
-  const body = document.createElement("div");
-  body.textContent = `Touch Node Manager: picker for "${widget.name}" on ${node?.type} — implement me.`;
-  modal.bodyEl.appendChild(body);
-}
-
-// ============================================================
-// Wiring
-// ============================================================
-
-function enhanceNode(node: PatchedNode): void {
-  for (const w of node?.widgets ?? []) {
-    if (!TARGET_WIDGETS.has(w.name)) continue;
-    if (w._touchManagerPatched) continue; // guard against double-patching
-    w._touchManagerPatched = true;
-
-    // Strategy A: wrap onPointerDown. Chain to the original first; only open
-    // our modal if the original didn't consume the event. Fall back to the
-    // native control on error (additive — never break the widget).
-    const origDown = w.onPointerDown;
-    w.onPointerDown = function (
-      this: PatchedWidget,
-      pointer: unknown,
-      ownerNode: PatchedNode,
-      canvas: unknown,
-    ): boolean | undefined {
-      try {
-        if (typeof origDown === "function") {
-          const consumed = origDown.call(this, pointer, ownerNode, canvas);
-          if (consumed) return consumed;
-        }
-        openPicker(w, ownerNode || node);
-        return true; // consume — suppresses the native control
-      } catch (e) {
-        console.warn(`[${EXT_NAME}] picker open failed`, e);
-        return false; // fall back to native on error
-      }
-    };
+// Open the manager defensively — never let a failure bubble into ComfyUI's
+// command/menu/button dispatch.
+function safeOpen(): void {
+  try {
+    openManager();
+  } catch (e) {
+    console.error(`[${EXT_NAME}] failed to open node manager`, e);
   }
 }
 
 app.registerExtension({
   name: "comfy.touch-manager",
-  // Handle freshly created nodes AND nodes restored from a saved graph. The
-  // lifecycle-hook node params are the package's own `LGraphNode`; cast each to
-  // the structural `PatchedNode` this pack operates on.
-  async nodeCreated(node) {
+
+  // Informational setting: surfaced in the Install tab and passed in the
+  // install body, but the BACKEND bind gate is the real enforcement.
+  settings: [
+    {
+      id: "TouchManager.AllowRemoteInstall",
+      name: "Touch Manager: allow install from URL on non-loopback binds",
+      tooltip:
+        "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_INSTALL env + bind address are the real gate.",
+      type: "boolean",
+      defaultValue: false,
+    },
+    // `SettingParams.id` is typed `keyof Settings`; a custom id is intentional
+    // here, so cast the array at the registration boundary.
+  ] as unknown as Parameters<typeof app.registerExtension>[0]["settings"],
+
+  // A command so the manager is reachable from the command palette and menu.
+  commands: [
+    {
+      id: OPEN_COMMAND_ID,
+      label: "Touch Node Manager",
+      icon: "pi pi-th-large",
+      function: () => safeOpen(),
+    },
+  ],
+
+  // Surface the command under the Extensions menu group.
+  menuCommands: [
+    {
+      path: ["Extensions"],
+      commands: [OPEN_COMMAND_ID],
+    },
+  ],
+
+  // A top action-bar button — the primary touch entry point.
+  actionBarButtons: [
+    {
+      icon: "pi pi-th-large",
+      tooltip: "Touch Node Manager",
+      onClick: () => safeOpen(),
+    },
+  ],
+
+  // Optionally register a sidebar tab as a third entry point. Feature-detect
+  // extensionManager (recent) and degrade silently if absent.
+  setup() {
     try {
-      enhanceNode(node as unknown as PatchedNode);
+      const em = (app as { extensionManager?: { registerSidebarTab?: (t: unknown) => void } })
+        .extensionManager;
+      em?.registerSidebarTab?.({
+        id: "touch-manager",
+        type: "custom",
+        title: "Node Manager",
+        icon: "pi pi-th-large",
+        tooltip: "Touch Node Manager",
+        render: (container: HTMLElement) => {
+          container.replaceChildren();
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Open Node Manager";
+          btn.style.cssText =
+            "margin:12px;min-height:44px;padding:10px 14px;font-size:15px;border-radius:8px;cursor:pointer;";
+          btn.addEventListener("click", safeOpen);
+          container.appendChild(btn);
+        },
+      });
     } catch (e) {
-      console.warn(`[${EXT_NAME}] nodeCreated enhance failed`, e);
-    }
-  },
-  async loadedGraphNode(node) {
-    try {
-      enhanceNode(node as unknown as PatchedNode);
-    } catch (e) {
-      console.warn(`[${EXT_NAME}] loadedGraphNode enhance failed`, e);
+      console.warn(`[${EXT_NAME}] sidebar tab registration failed`, e);
     }
   },
 });
 
-// Re-export the pure helpers a real implementation adds here, so the Vitest
-// suite (tests/js) can import them directly from the .ts source. The seed
-// example is a placeholder — replace with this pack's own helpers.
-export function clampToTargets(name: string): boolean {
-  return TARGET_WIDGETS.has(name);
-}
+// Re-export the pure helpers so the Vitest suite can import them from the
+// barrel as well as from manager-core directly.
+export {
+  filterPacks,
+  formatRef,
+  formatUpdateStatus,
+  sanitizePackName,
+  validateInstallUrl,
+  versionOptions,
+} from "./manager-core";

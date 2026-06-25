@@ -67,6 +67,20 @@ export interface ManagerConfig {
   manager_enabled: boolean;
 }
 
+/**
+ * Whether the Install-from-URL action should be enabled, mirroring the backend
+ * /install gate exactly: it allows the clone when the server is bound to a
+ * loopback address OR the operator set TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1
+ * (reported as `allow_remote_install`). `allow_remote_install` alone is only
+ * the non-loopback override — gating on it would wrongly disable install on the
+ * normal loopback setup. With no config yet, default to enabled and let the
+ * backend (the real gate) decide.
+ */
+export function installPermitted(config: ManagerConfig | null): boolean {
+  if (!config) return true;
+  return config.is_loopback || config.allow_remote_install;
+}
+
 /** GET /touch_manager/core. */
 export interface CoreInfo {
   is_git: boolean;

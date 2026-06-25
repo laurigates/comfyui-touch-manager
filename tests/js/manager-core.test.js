@@ -7,12 +7,39 @@ import {
   formatCoreBehind,
   formatRef,
   formatUpdateStatus,
+  installPermitted,
   sanitizePackName,
   sortBranches,
   sortTags,
   validateInstallUrl,
   versionOptions,
 } from "../../src/manager-core.ts";
+
+describe("installPermitted — mirror of the backend /install bind gate", () => {
+  const cfg = (over) => ({
+    allow_remote_install: false,
+    is_loopback: false,
+    manager_enabled: false,
+    ...over,
+  });
+
+  it("permits install on a loopback bind even without the override", () => {
+    // Regression: the common 127.0.0.1 setup must NOT disable install.
+    expect(installPermitted(cfg({ is_loopback: true, allow_remote_install: false }))).toBe(true);
+  });
+
+  it("permits install on a non-loopback bind when the override is set", () => {
+    expect(installPermitted(cfg({ is_loopback: false, allow_remote_install: true }))).toBe(true);
+  });
+
+  it("blocks install on a non-loopback bind without the override", () => {
+    expect(installPermitted(cfg({ is_loopback: false, allow_remote_install: false }))).toBe(false);
+  });
+
+  it("defaults to permitted when config has not loaded yet (backend still gates)", () => {
+    expect(installPermitted(null)).toBe(true);
+  });
+});
 
 describe("validateInstallUrl — mirror of the backend URL gate", () => {
   it("accepts canonical github/gitlab https URLs and derives the dir name", () => {

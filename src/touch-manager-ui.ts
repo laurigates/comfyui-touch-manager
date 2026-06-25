@@ -25,6 +25,7 @@ import {
   formatRef,
   formatUpdateStatus,
   type InstalledPack,
+  installPermitted,
   type ManagerConfig,
   type UpdateInfo,
   urlValidationHint,
@@ -576,9 +577,10 @@ async function renderInstallTab(state: ManagerState): Promise<void> {
   const cfg = state.config;
   const settingAllow = readAllowRemoteSetting();
 
-  // Blocked when the backend reports remote install is not permitted on a
-  // non-loopback bind. The backend is the real gate; this is UX.
-  const blocked = cfg ? !cfg.allow_remote_install : false;
+  // Blocked only when the backend would refuse the clone: a non-loopback bind
+  // without the override. On loopback, install is permitted. The backend is the
+  // real gate; this mirrors it (see installPermitted).
+  const blocked = !installPermitted(cfg);
 
   if (cfg && !cfg.is_loopback) {
     section.appendChild(

@@ -1,0 +1,1476 @@
+// src/index.ts
+import { app as app2 } from "/scripts/app.js";
+
+// node_modules/@laurigates/comfy-modal-kit/dist/index.js
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+function fuzzyRank(query, fields, primaryWeight = 10) {
+  if (!query)
+    return { score: 0, primaryMatches: [] };
+  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length)
+    return { score: 0, primaryMatches: [] };
+  const primary = fields[0] || "";
+  const rest = fields.slice(1).filter((f) => Boolean(f));
+  let totalScore = 0;
+  const primaryMatchSet = new Set;
+  for (const token of tokens) {
+    const primaryResult = fuzzyScore(token, primary);
+    let best = primaryResult ? {
+      score: primaryResult.score * primaryWeight,
+      matches: primaryResult.matches,
+      onPrimary: true
+    } : null;
+    for (const field of rest) {
+      const r = fuzzyScore(token, field);
+      if (r && (!best || r.score > best.score)) {
+        best = { score: r.score, matches: r.matches, onPrimary: false };
+      }
+    }
+    if (!best)
+      return null;
+    totalScore += best.score;
+    if (best.onPrimary) {
+      for (const i of best.matches)
+        primaryMatchSet.add(i);
+    }
+  }
+  return {
+    score: totalScore,
+    primaryMatches: [...primaryMatchSet].sort((a, b) => a - b)
+  };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
+}
+var STYLE_ID = "cmp-shell-style";
+var ACTIVE = null;
+var CSS = `
+.cmp-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 9998;
+    backdrop-filter: blur(2px);
+    touch-action: manipulation;
+}
+.cmp-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 9999;
+    width: min(960px, calc(100vw - 24px));
+    max-height: min(85vh, 800px);
+    touch-action: manipulation;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a1f;
+    color: #e8e8ea;
+    border: 1px solid #3a3a44;
+    border-radius: 10px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+}
+.cmp-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2a32;
+    background: #21212a;
+    flex-shrink: 0;
+}
+.cmp-title {
+    flex: 1;
+    font-weight: 600;
+    color: #9ec6ff;
+    font-size: 14px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cmp-subtitle {
+    color: #888;
+    font-weight: 400;
+    font-size: 12px;
+    margin-left: 6px;
+}
+.cmp-close {
+    background: transparent;
+    color: #aaa;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    width: 36px;
+    height: 36px;
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.cmp-close:hover {
+    background: #2a2a32;
+    color: #fff;
+}
+.cmp-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 14px;
+    border-bottom: 1px solid #2a2a32;
+    background: #1f1f26;
+    flex-shrink: 0;
+}
+.cmp-toolbar:empty {
+    display: none;
+}
+.cmp-searchrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #2a2a32;
+    flex-shrink: 0;
+}
+.cmp-search {
+    flex: 1;
+    background: #12121a;
+    border: 1px solid #3a3a44;
+    border-radius: 4px;
+    color: #e8e8ea;
+    padding: 8px 12px;
+    /* 16px prevents iOS auto-zoom on focus. */
+    font-size: 16px;
+    font-family: inherit;
+    outline: none;
+    min-width: 0;
+}
+.cmp-search:focus {
+    border-color: #6ba6ff;
+}
+.cmp-status {
+    color: #888;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.cmp-body {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: 8px;
+    position: relative;
+}
+.cmp-body.is-busy {
+    opacity: 0.5;
+    pointer-events: none;
+}
+.cmp-footer {
+    padding: 8px 14px;
+    border-top: 1px solid #2a2a32;
+    color: #777;
+    font-size: 11px;
+    background: #1f1f26;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
+.cmp-footer:empty {
+    display: none;
+}
+.cmp-footer kbd {
+    background: #2a2a36;
+    border: 1px solid #3a3a44;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    color: #b8b8c0;
+}
+`;
+function ensureStyle() {
+  if (document.getElementById(STYLE_ID))
+    return;
+  const s = document.createElement("style");
+  s.id = STYLE_ID;
+  s.textContent = CSS;
+  document.head.appendChild(s);
+}
+function dismissActive() {
+  if (!ACTIVE)
+    return;
+  const a = ACTIVE;
+  ACTIVE = null;
+  try {
+    a.backdrop.remove();
+    a.dialog.remove();
+    document.removeEventListener("keydown", a._onKey, true);
+  } finally {
+    try {
+      a.opts.onClose?.();
+    } catch (e) {
+      console.warn("[modal-shell] onClose threw", e);
+    }
+  }
+}
+function openModalShell(opts = {}) {
+  ensureStyle();
+  dismissActive();
+  const backdrop = document.createElement("div");
+  backdrop.className = "cmp-backdrop";
+  backdrop.addEventListener("pointerdown", dismissActive);
+  const dialog = document.createElement("div");
+  dialog.className = "cmp-dialog";
+  if (opts.width)
+    dialog.style.width = opts.width;
+  if (opts.height)
+    dialog.style.maxHeight = opts.height;
+  const stop = (e) => e.stopPropagation();
+  for (const ev of ["pointerdown", "pointerup", "click", "dblclick", "wheel"]) {
+    dialog.addEventListener(ev, stop);
+  }
+  const headerEl = document.createElement("div");
+  headerEl.className = "cmp-header";
+  const titleEl = document.createElement("div");
+  titleEl.className = "cmp-title";
+  titleEl.textContent = opts.title || "";
+  if (opts.subtitle) {
+    const sub = document.createElement("span");
+    sub.className = "cmp-subtitle";
+    sub.textContent = opts.subtitle;
+    titleEl.appendChild(sub);
+  }
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "cmp-close";
+  closeBtn.type = "button";
+  closeBtn.textContent = "×";
+  closeBtn.title = "Close (Esc)";
+  closeBtn.addEventListener("click", dismissActive);
+  headerEl.append(titleEl, closeBtn);
+  const toolbarEl = document.createElement("div");
+  toolbarEl.className = "cmp-toolbar";
+  const searchRow = document.createElement("div");
+  searchRow.className = "cmp-searchrow";
+  const searchEl = document.createElement("input");
+  searchEl.type = "search";
+  searchEl.className = "cmp-search";
+  searchEl.placeholder = opts.placeholder || "Filter…";
+  searchEl.spellcheck = false;
+  searchEl.autocomplete = "off";
+  const statusEl = document.createElement("div");
+  statusEl.className = "cmp-status";
+  searchRow.append(searchEl, statusEl);
+  if (opts.showSearch === false)
+    searchRow.style.display = "none";
+  const bodyEl = document.createElement("div");
+  bodyEl.className = "cmp-body";
+  const footerEl = document.createElement("div");
+  footerEl.className = "cmp-footer";
+  if (opts.showFooter !== false) {
+    const l = document.createElement("div");
+    if (opts.footerLeftHTML)
+      l.innerHTML = opts.footerLeftHTML;
+    const r = document.createElement("div");
+    if (opts.footerRightHTML)
+      r.innerHTML = opts.footerRightHTML;
+    footerEl.append(l, r);
+  } else {
+    footerEl.style.display = "none";
+  }
+  dialog.append(headerEl, toolbarEl, searchRow, bodyEl, footerEl);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismissActive();
+      return;
+    }
+    try {
+      opts.onKeyDown?.(e);
+    } catch (err) {
+      console.warn("[modal-shell] onKeyDown threw", err);
+    }
+  };
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(backdrop, dialog);
+  const controller = {
+    backdrop,
+    dialog,
+    headerEl,
+    toolbarEl,
+    searchEl,
+    statusEl,
+    bodyEl,
+    footerEl,
+    setBusy(b) {
+      bodyEl.classList.toggle("is-busy", !!b);
+    },
+    setStatus(s) {
+      statusEl.textContent = s || "";
+    },
+    close: dismissActive,
+    _onKey: onKey,
+    opts
+  };
+  ACTIVE = controller;
+  if (opts.showSearch !== false) {
+    requestAnimationFrame(() => {
+      if (ACTIVE === controller)
+        searchEl.focus();
+    });
+  }
+  return controller;
+}
+
+// src/touch-manager-ui.ts
+import { app } from "/scripts/app.js";
+
+// src/manager-core.ts
+function formatProgress(done, total) {
+  return `checked ${done}/${total}`;
+}
+function partitionUpdateResults(results) {
+  const actionable = [];
+  const errored = [];
+  const upToDate = [];
+  for (const r of results) {
+    if (r.error)
+      errored.push(r);
+    else if (r.update_available)
+      actionable.push(r);
+    else
+      upToDate.push(r);
+  }
+  return { actionable, errored, upToDate };
+}
+function mergeVersionEntries(gitInfo, registryVersions) {
+  const out = [];
+  if (gitInfo) {
+    for (const ref of versionOptions(gitInfo))
+      out.push({ kind: "git", label: ref, ref });
+  }
+  for (const v of registryVersions) {
+    out.push({
+      kind: "registry",
+      label: v.version,
+      version: v.version,
+      meta: v.deprecated ? "deprecated" : undefined
+    });
+  }
+  return out;
+}
+function iconForKind(kind) {
+  return kind === "git" ? "git" : "registry";
+}
+function formatDownloads(n) {
+  const v = typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0;
+  if (v >= 1e6)
+    return `${(v / 1e6).toFixed(1).replace(/\.0$/, "")}M`;
+  if (v >= 1000)
+    return `${(v / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(v);
+}
+function formatRegistryMeta(node) {
+  const parts = [];
+  if (node.author)
+    parts.push(node.author);
+  parts.push(`${formatDownloads(node.downloads)} downloads`);
+  if (node.latest_version)
+    parts.push(`v${node.latest_version}`);
+  return parts.join(" · ");
+}
+function installPermitted(config) {
+  if (!config)
+    return true;
+  return config.is_loopback || config.allow_remote_install;
+}
+function rebootPermitted(config) {
+  return config ? config.reboot_allowed : false;
+}
+var ALLOWED_INSTALL_HOSTS = new Set(["github.com", "gitlab.com"]);
+function sanitizePackName(raw) {
+  if (raw.includes("/") || raw.includes("\\"))
+    return "";
+  const cleaned = raw.replace(/[^A-Za-z0-9._-]/g, "");
+  if (cleaned === "" || cleaned === "." || cleaned === "..")
+    return "";
+  return cleaned;
+}
+function validateInstallUrl(rawUrl) {
+  const url = (rawUrl ?? "").trim();
+  if (!url)
+    return { ok: false, code: "invalid_url", reason: "empty" };
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, code: "invalid_url", reason: "unparseable" };
+  }
+  if (parsed.protocol !== "https:") {
+    return { ok: false, code: "invalid_url", reason: "not_https" };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!ALLOWED_INSTALL_HOSTS.has(host)) {
+    return { ok: false, code: "invalid_url", reason: "host_not_allowed" };
+  }
+  const segments = parsed.pathname.split("/").filter((s) => s.length > 0);
+  if (segments.length < 2) {
+    return { ok: false, code: "invalid_url", reason: "missing_owner_repo" };
+  }
+  const owner = segments[0] ?? "";
+  let last = segments[segments.length - 1] ?? "";
+  if (last.endsWith(".git"))
+    last = last.slice(0, -4);
+  const name = sanitizePackName(last);
+  if (!name)
+    return { ok: false, code: "invalid_url", reason: "bad_name" };
+  return { ok: true, name, host, owner };
+}
+function urlValidationHint(reason) {
+  switch (reason) {
+    case "empty":
+      return "Enter a repository URL.";
+    case "unparseable":
+      return "Not a valid URL.";
+    case "not_https":
+      return "URL must start with https://";
+    case "host_not_allowed":
+      return "Only github.com and gitlab.com are allowed.";
+    case "missing_owner_repo":
+      return "URL must be https://github.com/<owner>/<repo>.";
+    case "bad_name":
+      return "Could not derive a safe directory name from the URL.";
+  }
+}
+function shortSha(sha) {
+  return sha ? sha.slice(0, 7) : "";
+}
+function formatRef(ref) {
+  if (!ref)
+    return "unknown";
+  const sha = shortSha(ref.sha);
+  if (ref.type === "detached")
+    return sha ? `detached @ ${sha}` : "detached";
+  if (ref.name)
+    return sha ? `${ref.name} @ ${sha}` : ref.name;
+  return sha || ref.type;
+}
+function formatUpdateStatus(info) {
+  if (info.error)
+    return `error: ${info.error}`;
+  if (info.update_available) {
+    const parts = [];
+    if (info.behind > 0)
+      parts.push(`${info.behind} behind`);
+    if (info.ahead > 0)
+      parts.push(`${info.ahead} ahead`);
+    return parts.length ? `update available — ${parts.join(", ")}` : "update available";
+  }
+  if (info.ahead > 0)
+    return `${info.ahead} ahead (local commits)`;
+  return "up to date";
+}
+function formatUpdateSummary(r) {
+  if (r.commits_applied === 0)
+    return "Already up to date — nothing to apply.";
+  const parts = [];
+  if (r.before_short && r.after_short)
+    parts.push(`${r.before_short} → ${r.after_short}`);
+  const commits = `${r.commits_applied} commit${r.commits_applied === 1 ? "" : "s"}`;
+  parts.push(r.truncated ? `${commits} (log truncated)` : commits);
+  if (r.changed_files > 0) {
+    parts.push(`${r.changed_files} file${r.changed_files === 1 ? "" : "s"} changed`);
+  }
+  return parts.join(" · ");
+}
+function formatDepsWarning(r) {
+  return r.deps_changed ? "requirements.txt changed — install Python dependencies manually, then restart." : null;
+}
+function formatCommitLine(entry) {
+  return `${entry.sha} ${entry.subject}`.trim();
+}
+function formatCoreBehind(behind) {
+  const parts = [];
+  if (behind.origin != null && behind.origin > 0)
+    parts.push(`${behind.origin} behind origin`);
+  if (behind.upstream != null && behind.upstream > 0)
+    parts.push(`${behind.upstream} behind upstream`);
+  return parts.length ? parts.join(", ") : "up to date";
+}
+var PREFERRED_BRANCHES = ["main", "master", "develop"];
+function parseSemver(tag) {
+  const m = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(tag.trim());
+  if (!m)
+    return null;
+  return [Number(m[1] ?? 0), Number(m[2] ?? 0), Number(m[3] ?? 0)];
+}
+function compareTagsDesc(a, b) {
+  const sa = parseSemver(a);
+  const sb = parseSemver(b);
+  if (sa && sb) {
+    for (let i = 0;i < 3; i++) {
+      const diff = (sb[i] ?? 0) - (sa[i] ?? 0);
+      if (diff !== 0)
+        return diff;
+    }
+    return a.localeCompare(b);
+  }
+  if (sa)
+    return -1;
+  if (sb)
+    return 1;
+  return a.localeCompare(b);
+}
+function sortBranches(branches) {
+  return [...branches].sort((a, b) => {
+    const ia = PREFERRED_BRANCHES.indexOf(a);
+    const ib = PREFERRED_BRANCHES.indexOf(b);
+    if (ia !== -1 || ib !== -1) {
+      if (ia === -1)
+        return 1;
+      if (ib === -1)
+        return -1;
+      return ia - ib;
+    }
+    return a.localeCompare(b);
+  });
+}
+function sortTags(tags) {
+  return [...tags].sort(compareTagsDesc);
+}
+function versionOptions(info) {
+  const seen = new Set;
+  const out = [];
+  for (const ref of [...sortBranches(info.branches), ...sortTags(info.tags)]) {
+    if (seen.has(ref))
+      continue;
+    seen.add(ref);
+    out.push(ref);
+  }
+  return out;
+}
+function filterPacks(query, packs) {
+  const q = query.trim();
+  if (!q) {
+    return [...packs].sort((a, b) => a.name.localeCompare(b.name)).map((pack) => ({ pack, primaryMatches: [] }));
+  }
+  const scored = [];
+  for (const pack of packs) {
+    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null]);
+    if (r)
+      scored.push({ pack, score: r.score, primaryMatches: r.primaryMatches });
+  }
+  scored.sort((a, b) => b.score - a.score || a.pack.name.localeCompare(b.pack.name));
+  return scored.map(({ pack, primaryMatches }) => ({ pack, primaryMatches }));
+}
+
+// src/touch-manager-ui.ts
+var EXT_NAME = "comfyui-touch-manager";
+var SETTING_ALLOW_REMOTE = "TouchManager.AllowRemoteInstall";
+
+class ManagerError extends Error {
+  code;
+  constructor(message, code) {
+    super(message);
+    this.name = "ManagerError";
+    this.code = code;
+  }
+}
+async function apiGet(path) {
+  const res = await app.api.fetchApi(app.api.apiURL(`/touch_manager/${path}`));
+  const data = await res.json();
+  if (!data.ok)
+    throw new ManagerError(data.error ?? "request failed", data.code);
+  return data;
+}
+async function apiPost(path, body) {
+  const res = await app.api.fetchApi(app.api.apiURL(`/touch_manager/${path}`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!data.ok)
+    throw new ManagerError(data.error ?? "request failed", data.code);
+  return data;
+}
+function hasExtMgr() {
+  return typeof app !== "undefined" && !!app.extensionManager;
+}
+function toast(severity, summary, detail, life = 4000) {
+  try {
+    if (hasExtMgr()) {
+      app.extensionManager.toast.add({ severity, summary, detail, life });
+    } else {
+      console.info(`[${EXT_NAME}] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
+    }
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] toast failed`, e);
+  }
+}
+async function confirmAction(title, message) {
+  try {
+    if (hasExtMgr()) {
+      const ok = await app.extensionManager.dialog.confirm({ title, message });
+      return ok === true;
+    }
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] confirm failed`, e);
+  }
+  return typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(`${title}
+
+${message}`) : false;
+}
+var STYLE_ID2 = "touch-manager-style";
+function ensureStyle2() {
+  if (document.getElementById(STYLE_ID2))
+    return;
+  const s = document.createElement("style");
+  s.id = STYLE_ID2;
+  s.textContent = `
+.tm-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 44px; padding: 10px 12px;
+  font-size: 15px; border-radius: 8px; border: 1px solid var(--border-color, #444);
+  background: var(--comfy-input-bg, #222); color: inherit; cursor: pointer; }
+.tm-tab.tm-active { background: var(--p-primary-color, #2b6cb0); color: #fff; border-color: transparent; }
+.tm-list { display: flex; flex-direction: column; gap: 8px; -webkit-overflow-scrolling: touch; }
+.tm-row { display: flex; flex-direction: column; gap: 6px; padding: 12px;
+  border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }
+.tm-row-title { font-size: 16px; font-weight: 600; word-break: break-word; }
+.tm-row-meta { font-size: 13px; opacity: 0.75; word-break: break-word; }
+.tm-row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.tm-btn { min-height: 44px; padding: 8px 14px; font-size: 15px; border-radius: 8px;
+  border: 1px solid var(--border-color, #444); background: var(--comfy-input-bg, #2a2a2a);
+  color: inherit; cursor: pointer; }
+.tm-btn:disabled { opacity: 0.4; cursor: default; }
+.tm-btn-danger { border-color: #a33; }
+.tm-btn-primary { background: var(--p-primary-color, #2b6cb0); color: #fff; border-color: transparent; }
+.tm-input { width: 100%; box-sizing: border-box; min-height: 44px; padding: 10px 12px;
+  font-size: 16px; border-radius: 8px; border: 1px solid var(--border-color, #444);
+  background: var(--comfy-input-bg, #222); color: inherit; }
+.tm-note { font-size: 13px; padding: 10px 12px; border-radius: 8px; line-height: 1.4; }
+.tm-note-warn { background: rgba(180,140,20,0.18); border: 1px solid rgba(180,140,20,0.5); }
+.tm-note-info { background: rgba(40,90,160,0.18); border: 1px solid rgba(40,90,160,0.5); }
+.tm-restart { background: rgba(180,140,20,0.22); border: 1px solid rgba(200,150,20,0.7);
+  padding: 12px; border-radius: 10px; font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+.tm-empty { opacity: 0.7; font-size: 14px; padding: 16px 4px; text-align: center; }
+.tm-field-label { font-size: 13px; opacity: 0.8; margin-bottom: 4px; }
+.tm-section { display: flex; flex-direction: column; gap: 10px; }
+.tm-badge { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 2px 7px; border-radius: 6px; margin-right: 8px;
+  border: 1px solid var(--border-color, #444); opacity: 0.85; }
+.tm-badge-git { background: rgba(40,90,160,0.25); }
+.tm-badge-registry { background: rgba(120,60,160,0.25); }
+.tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
+.cmp-match { text-decoration: underline; }
+`;
+  document.head.appendChild(s);
+}
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className)
+    node.className = className;
+  if (text != null)
+    node.textContent = text;
+  return node;
+}
+function button(label, className, onClick) {
+  const b = el("button", `tm-btn ${className}`, label);
+  b.type = "button";
+  b.addEventListener("click", onClick);
+  return b;
+}
+function emptyState(message) {
+  return el("div", "tm-empty", message);
+}
+function restartBanner(state) {
+  const banner = el("div", "tm-restart");
+  banner.appendChild(el("div", undefined, "Restart ComfyUI to apply changes."));
+  if (rebootPermitted(state.config)) {
+    const actions = el("div", "tm-row-actions");
+    actions.appendChild(button("Restart now", "tm-btn-primary", () => void doReboot(state)));
+    banner.appendChild(actions);
+  }
+  return banner;
+}
+function openManager() {
+  try {
+    ensureStyle2();
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] style injection failed`, e);
+  }
+  const shell = openModalShell({
+    title: "Node Manager",
+    subtitle: "touch",
+    placeholder: "Filter installed packs…",
+    showSearch: true,
+    showFooter: false,
+    width: "min(720px, 96vw)",
+    height: "92vh"
+  });
+  const state = {
+    shell,
+    config: null,
+    installed: [],
+    activeTab: "installed",
+    restartPending: false
+  };
+  const tabBar = el("div", "tm-tabs");
+  const tabs = [
+    { id: "installed", label: "Installed" },
+    { id: "updates", label: "Updates" },
+    { id: "install", label: "Install URL" },
+    { id: "registry", label: "Registry" },
+    { id: "core", label: "Core" }
+  ];
+  const tabButtons = new Map;
+  for (const t of tabs) {
+    const b = el("button", "tm-tab", t.label);
+    b.type = "button";
+    b.addEventListener("click", () => selectTab(t.id));
+    tabButtons.set(t.id, b);
+    tabBar.appendChild(b);
+  }
+  shell.toolbarEl.appendChild(tabBar);
+  function setSearchVisible(visible) {
+    const row = shell.searchEl.parentElement;
+    if (row)
+      row.style.display = visible ? "" : "none";
+  }
+  function selectTab(id) {
+    state.activeTab = id;
+    for (const [tid, b] of tabButtons)
+      b.classList.toggle("tm-active", tid === id);
+    setSearchVisible(id === "installed");
+    shell.setStatus("");
+    renderActiveTab(state, id);
+  }
+  shell.searchEl.addEventListener("input", () => {
+    if (state.activeTab === "installed")
+      renderInstalledList(state);
+  });
+  (async () => {
+    try {
+      state.config = await apiGet("config");
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] config load failed`, e);
+      state.config = null;
+    }
+    selectTab("installed");
+  })();
+}
+async function renderActiveTab(state, id) {
+  switch (id) {
+    case "installed":
+      return renderInstalledTab(state);
+    case "updates":
+      return renderUpdatesTab(state);
+    case "install":
+      return renderInstallTab(state);
+    case "registry":
+      return renderRegistryTab(state);
+    case "core":
+      return renderCoreTab(state);
+  }
+}
+function resetBody(state) {
+  const body = state.shell.bodyEl;
+  body.replaceChildren();
+  if (state.restartPending)
+    body.appendChild(restartBanner(state));
+  const section = el("div", "tm-section");
+  body.appendChild(section);
+  return section;
+}
+function markRestartPending(state) {
+  state.restartPending = true;
+}
+async function renderInstalledTab(state) {
+  const section = resetBody(state);
+  section.appendChild(emptyState("Loading installed packs…"));
+  state.shell.setBusy(true);
+  try {
+    const data = await apiGet("installed");
+    state.installed = data.packs ?? [];
+  } catch (e) {
+    state.installed = [];
+    section.replaceChildren(emptyState(`Failed to load: ${e.message}`));
+    return;
+  } finally {
+    state.shell.setBusy(false);
+  }
+  renderInstalledList(state);
+}
+function renderInstalledList(state) {
+  const section = resetBody(state);
+  const query = state.shell.searchEl.value;
+  const ranked = filterPacks(query, state.installed);
+  state.shell.setStatus(`${ranked.length}/${state.installed.length}`);
+  if (ranked.length === 0) {
+    section.appendChild(emptyState(state.installed.length === 0 ? "No packs found." : "No matches."));
+    return;
+  }
+  const list = el("div", "tm-list");
+  for (const { pack, primaryMatches } of ranked) {
+    list.appendChild(installedRow(state, pack, primaryMatches));
+  }
+  section.appendChild(list);
+}
+function installedRow(state, pack, matches) {
+  const row = el("div", "tm-row");
+  const title = el("div", "tm-row-title");
+  title.appendChild(highlightMatches(pack.name, matches));
+  if (!pack.enabled) {
+    const tag = el("span", "tm-row-meta", "  (disabled)");
+    title.appendChild(tag);
+  }
+  row.appendChild(title);
+  const metaBits = [];
+  if (pack.is_git)
+    metaBits.push(formatRef(pack.ref));
+  else
+    metaBits.push("not a git repo");
+  if (pack.dirty)
+    metaBits.push("local changes");
+  row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
+  if (pack.remote_url)
+    row.appendChild(el("div", "tm-row-meta", pack.remote_url));
+  const actions = el("div", "tm-row-actions");
+  const gitDisabledReason = pack.is_git ? "" : "not a git repo";
+  const updateBtn = button("Update", "", () => void doUpdate(state, pack.name));
+  updateBtn.disabled = !pack.is_git;
+  if (gitDisabledReason)
+    updateBtn.title = gitDisabledReason;
+  actions.appendChild(updateBtn);
+  const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
+  versionsBtn.disabled = !pack.is_git;
+  if (gitDisabledReason)
+    versionsBtn.title = gitDisabledReason;
+  actions.appendChild(versionsBtn);
+  if (pack.enabled) {
+    actions.appendChild(button("Uninstall", "tm-btn-danger", () => void doUninstall(state, pack.name)));
+  }
+  row.appendChild(actions);
+  return row;
+}
+async function doUpdate(state, name, ref) {
+  state.shell.setBusy(true);
+  try {
+    const result = await apiPost("update", ref ? { name, ref } : { name });
+    markRestartPending(state);
+    toast("success", `Updated ${name}`, formatUpdateSummary(result));
+    state.shell.setBusy(false);
+    renderUpdateResult(state, { ...result, name });
+  } catch (e) {
+    const err = e;
+    toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+    state.shell.setBusy(false);
+  }
+}
+function renderUpdateResult(state, result) {
+  const section = resetBody(state);
+  section.appendChild(button("← Back to installed", "", () => void renderInstalledTab(state)));
+  section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
+  section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
+  const depsWarning = formatDepsWarning(result);
+  if (depsWarning)
+    section.appendChild(el("div", "tm-note tm-note-warn", depsWarning));
+  if (result.commit_log.length > 0) {
+    section.appendChild(el("div", "tm-field-label", "Applied commits"));
+    const list = el("div", "tm-list");
+    for (const entry of result.commit_log) {
+      list.appendChild(el("div", "tm-row-meta", formatCommitLine(entry)));
+    }
+    if (result.truncated)
+      list.appendChild(el("div", "tm-row-meta", "…older commits omitted"));
+    section.appendChild(list);
+  }
+}
+async function doUninstall(state, name) {
+  const ok = await confirmAction("Disable pack?", `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`);
+  if (!ok)
+    return;
+  state.shell.setBusy(true);
+  try {
+    await apiPost("uninstall", { name });
+    markRestartPending(state);
+    toast("success", `Disabled ${name}`, "Restart ComfyUI to apply.");
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e;
+    toast("error", `Uninstall failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+async function openVersions(state, pack) {
+  const section = resetBody(state);
+  const back = button("← Back to installed", "", () => void renderInstalledTab(state));
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${pack.name}`));
+  section.appendChild(emptyState("Loading versions…"));
+  state.shell.setBusy(true);
+  let info;
+  try {
+    info = await apiGet(`versions?name=${encodeURIComponent(pack.name)}`);
+  } catch (e) {
+    section.replaceChildren(back, el("div", "tm-row-title", `Versions — ${pack.name}`), emptyState(`Failed: ${e.message}`));
+    state.shell.setBusy(false);
+    return;
+  }
+  state.shell.setBusy(false);
+  section.replaceChildren();
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${pack.name}`));
+  const refs = versionOptions(info);
+  if (refs.length === 0 && info.releases.length === 0) {
+    section.appendChild(emptyState("No branches, tags, or releases found."));
+    return;
+  }
+  if (refs.length > 0) {
+    section.appendChild(el("div", "tm-field-label", "Branches & tags"));
+    const list = el("div", "tm-list");
+    for (const ref of refs) {
+      const r = el("div", "tm-row");
+      r.appendChild(el("div", "tm-row-title", ref));
+      const actions = el("div", "tm-row-actions");
+      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, ref)));
+      r.appendChild(actions);
+      list.appendChild(r);
+    }
+    section.appendChild(list);
+  }
+  if (info.releases.length > 0) {
+    section.appendChild(el("div", "tm-field-label", "GitHub releases"));
+    const list = el("div", "tm-list");
+    for (const rel of info.releases) {
+      const r = el("div", "tm-row");
+      r.appendChild(el("div", "tm-row-title", rel.name || rel.tag));
+      const meta = [rel.tag];
+      if (rel.prerelease)
+        meta.push("prerelease");
+      if (rel.published_at)
+        meta.push(rel.published_at);
+      r.appendChild(el("div", "tm-row-meta", meta.join(" · ")));
+      const actions = el("div", "tm-row-actions");
+      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, rel.tag)));
+      r.appendChild(actions);
+      list.appendChild(r);
+    }
+    section.appendChild(list);
+  }
+}
+async function renderUpdatesTab(state) {
+  const section = resetBody(state);
+  section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+  section.appendChild(el("div", "tm-note tm-note-info", "Fetches each git pack's remote and compares against the tracked branch."));
+}
+function updateRow(state, info) {
+  const r = el("div", "tm-row");
+  r.appendChild(el("div", "tm-row-title", info.name));
+  r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
+  for (const c of info.incoming) {
+    r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
+  }
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name)));
+  r.appendChild(actions);
+  return r;
+}
+var UPDATE_CHECK_CONCURRENCY = 3;
+async function checkUpdates(state) {
+  const section = resetBody(state);
+  section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+  let names;
+  try {
+    const data = await apiGet("updates/list");
+    names = (data.packs ?? []).map((p) => p.name);
+  } catch (e) {
+    section.appendChild(emptyState(`Failed: ${e.message}`));
+    return;
+  }
+  if (names.length === 0) {
+    section.appendChild(emptyState("No git-backed packs to check."));
+    return;
+  }
+  const total = names.length;
+  state.shell.setStatus(formatProgress(0, total));
+  const list = el("div", "tm-list");
+  section.appendChild(list);
+  const errors = el("div", "tm-section");
+  const results = [];
+  let done = 0;
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < names.length) {
+      const name = names[cursor++];
+      if (name === undefined)
+        break;
+      let info;
+      try {
+        info = await apiGet(`updates/check?name=${encodeURIComponent(name)}`);
+      } catch (e) {
+        info = {
+          name,
+          update_available: false,
+          behind: 0,
+          ahead: 0,
+          error: e.message,
+          incoming: []
+        };
+      }
+      results.push(info);
+      if (info.update_available && !info.error)
+        list.appendChild(updateRow(state, info));
+      else if (info.error)
+        errors.appendChild(el("div", "tm-row-meta", `${info.name}: ${info.error}`));
+      state.shell.setStatus(formatProgress(++done, total));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()));
+  const { actionable, errored } = partitionUpdateResults(results);
+  if (actionable.length === 0)
+    list.appendChild(emptyState("Everything is up to date."));
+  if (errored.length > 0) {
+    section.appendChild(el("div", "tm-field-label", "Could not check"));
+    section.appendChild(errors);
+  }
+}
+async function renderInstallTab(state) {
+  const section = resetBody(state);
+  const cfg = state.config;
+  const settingAllow = readAllowRemoteSetting();
+  const blocked = !installPermitted(cfg);
+  if (cfg && !cfg.is_loopback) {
+    section.appendChild(el("div", "tm-note tm-note-warn", blocked ? "ComfyUI is bound to a non-loopback address. Install from URL is disabled on the server (set TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1 to allow)." : "ComfyUI is bound to a non-loopback address but remote install is explicitly allowed. Only install repositories you trust."));
+  } else {
+    section.appendChild(el("div", "tm-note tm-note-info", "Clones a github.com or gitlab.com repository into custom_nodes. A restart is required to load it. Only install code you trust."));
+  }
+  section.appendChild(el("div", "tm-field-label", "Repository URL"));
+  const input = el("input", "tm-input");
+  input.type = "url";
+  input.placeholder = "https://github.com/owner/repo";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  section.appendChild(input);
+  section.appendChild(el("div", "tm-field-label", "Ref (optional branch / tag)"));
+  const refInput = el("input", "tm-input");
+  refInput.type = "text";
+  refInput.placeholder = "leave empty for default branch";
+  refInput.autocomplete = "off";
+  refInput.spellcheck = false;
+  section.appendChild(refInput);
+  const hint = el("div", "tm-row-meta", "");
+  section.appendChild(hint);
+  const installBtn = button("Install", "tm-btn-primary", () => void doInstall(state, input.value, refInput.value));
+  section.appendChild(installBtn);
+  const refresh = () => {
+    if (blocked) {
+      installBtn.disabled = true;
+      hint.textContent = "Install is disabled by the server bind policy.";
+      return;
+    }
+    const v = validateInstallUrl(input.value);
+    if (v.ok) {
+      installBtn.disabled = false;
+      hint.textContent = `Will install as "${v.name}".`;
+    } else {
+      installBtn.disabled = true;
+      hint.textContent = input.value.trim() ? urlValidationHint(v.reason) : "";
+    }
+  };
+  input.addEventListener("input", refresh);
+  if (settingAllow && cfg && !cfg.is_loopback && blocked) {
+    section.appendChild(el("div", "tm-row-meta", "Your local setting allows remote install, but the server has not enabled it."));
+  }
+  refresh();
+}
+function readAllowRemoteSetting() {
+  try {
+    if (hasExtMgr()) {
+      return app.extensionManager.setting.get(SETTING_ALLOW_REMOTE) === true;
+    }
+  } catch (e) {
+    console.warn(`[${EXT_NAME}] setting read failed`, e);
+  }
+  return false;
+}
+async function doInstall(state, url, ref) {
+  const v = validateInstallUrl(url);
+  if (!v.ok) {
+    toast("warn", "Invalid URL", urlValidationHint(v.reason));
+    return;
+  }
+  const ok = await confirmAction("Install pack?", `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`);
+  if (!ok)
+    return;
+  state.shell.setBusy(true);
+  try {
+    const body = { url: url.trim() };
+    if (ref.trim())
+      body.ref = ref.trim();
+    const res = await apiPost("install", body);
+    markRestartPending(state);
+    toast("success", `Installed ${res.name}`, "Restart ComfyUI to apply.");
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e;
+    toast("error", "Install failed", `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+async function renderRegistryTab(state) {
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-note tm-note-info", "Search the Comfy Registry and install a node. Python dependencies are " + "NOT installed automatically — install them and restart afterwards."));
+  section.appendChild(el("div", "tm-field-label", "Search the registry"));
+  const input = el("input", "tm-input");
+  input.type = "search";
+  input.placeholder = "e.g. controlnet, upscale, ipadapter…";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  section.appendChild(input);
+  const results = el("div", "tm-section");
+  section.appendChild(results);
+  const run = (page) => void searchRegistry(state, input.value, page, results);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter")
+      run(1);
+  });
+  section.appendChild(button("Search", "tm-btn-primary", () => run(1)));
+}
+async function searchRegistry(state, query, page, results) {
+  results.replaceChildren(emptyState("Searching the registry…"));
+  state.shell.setBusy(true);
+  let data;
+  try {
+    data = await apiGet(`registry/search?q=${encodeURIComponent(query)}&page=${page}`);
+  } catch (e) {
+    results.replaceChildren(emptyState(`Registry search failed: ${e.message}`));
+    return;
+  } finally {
+    state.shell.setBusy(false);
+  }
+  results.replaceChildren();
+  const nodes = data.nodes ?? [];
+  if (nodes.length === 0) {
+    results.appendChild(emptyState("No matching nodes."));
+    return;
+  }
+  const list = el("div", "tm-list");
+  for (const node of nodes)
+    list.appendChild(registryRow(state, node));
+  results.appendChild(list);
+  const totalPages = data.total_pages ?? 1;
+  if (totalPages > 1) {
+    const pager = el("div", "tm-row-actions");
+    const prev = button("← Prev", "", () => void searchRegistry(state, query, page - 1, results));
+    prev.disabled = page <= 1;
+    const next = button("Next →", "", () => void searchRegistry(state, query, page + 1, results));
+    next.disabled = page >= totalPages;
+    pager.appendChild(prev);
+    pager.appendChild(el("div", "tm-row-meta", `Page ${page} / ${totalPages}`));
+    pager.appendChild(next);
+    results.appendChild(pager);
+  }
+}
+function registryRow(state, node) {
+  const row = el("div", "tm-row");
+  row.appendChild(el("div", "tm-row-title", node.name));
+  row.appendChild(el("div", "tm-row-meta", formatRegistryMeta(node)));
+  if (node.description)
+    row.appendChild(el("div", "tm-row-meta", node.description));
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Versions", "tm-btn-primary", () => void openRegistryVersions(state, node)));
+  row.appendChild(actions);
+  return row;
+}
+async function openRegistryVersions(state, node) {
+  const section = resetBody(state);
+  const back = button("← Back to registry", "", () => void renderRegistryTab(state));
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${node.name}`));
+  section.appendChild(emptyState("Loading versions…"));
+  state.shell.setBusy(true);
+  let versions;
+  try {
+    const data = await apiGet(`registry/versions?id=${encodeURIComponent(node.id)}`);
+    versions = data.versions ?? [];
+  } catch (e) {
+    section.replaceChildren(back, el("div", "tm-row-title", `Versions — ${node.name}`), emptyState(`Failed: ${e.message}`));
+    state.shell.setBusy(false);
+    return;
+  }
+  state.shell.setBusy(false);
+  section.replaceChildren();
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${node.name}`));
+  const entries = mergeVersionEntries(null, versions);
+  const repoOk = node.repository ? validateInstallUrl(node.repository).ok : false;
+  if (repoOk) {
+    entries.unshift({ kind: "git", label: `${node.repository} (default branch)` });
+  }
+  if (entries.length === 0) {
+    section.appendChild(emptyState("No installable versions found."));
+    return;
+  }
+  const list = el("div", "tm-list");
+  for (const entry of entries)
+    list.appendChild(registryVersionRow(state, node, entry));
+  section.appendChild(list);
+}
+function registryVersionRow(state, node, entry) {
+  const r = el("div", "tm-row");
+  const head = el("div", "tm-row-head");
+  const badge = el("span", `tm-badge tm-badge-${entry.kind}`, iconForKind(entry.kind));
+  head.appendChild(badge);
+  head.appendChild(el("span", "tm-row-title", entry.label));
+  r.appendChild(head);
+  if (entry.meta)
+    r.appendChild(el("div", "tm-row-meta", entry.meta));
+  const actions = el("div", "tm-row-actions");
+  if (entry.kind === "git") {
+    actions.appendChild(button("Install (git)", "tm-btn-primary", () => void doInstall(state, node.repository, "")));
+  } else {
+    actions.appendChild(button("Install", "tm-btn-primary", () => void doRegistryInstall(state, node, entry.version ?? null)));
+  }
+  r.appendChild(actions);
+  return r;
+}
+async function doRegistryInstall(state, node, version) {
+  const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
+  const ok = await confirmAction("Install from registry?", `Download and install ${label} from the Comfy Registry into custom_nodes? ` + "Only install code you trust. A restart is required.");
+  if (!ok)
+    return;
+  state.shell.setBusy(true);
+  try {
+    const body = { id: node.id, name: node.id };
+    if (version)
+      body.version = version;
+    const res = await apiPost("registry/install", body);
+    markRestartPending(state);
+    const detail = res.deps_changed ? "Python dependencies changed — install them, then restart." : "Restart ComfyUI to apply.";
+    toast("success", `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, detail);
+    state.shell.setBusy(false);
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e;
+    toast("error", "Registry install failed", `${err.message}${err.code ? ` (${err.code})` : ""}`);
+    state.shell.setBusy(false);
+  }
+}
+async function renderCoreTab(state) {
+  const section = resetBody(state);
+  section.appendChild(emptyState("Loading core repo info…"));
+  state.shell.setBusy(true);
+  let info;
+  try {
+    info = await apiGet("core");
+  } catch (e) {
+    section.replaceChildren(emptyState(`Failed: ${e.message}`));
+    state.shell.setBusy(false);
+    return;
+  }
+  state.shell.setBusy(false);
+  section.replaceChildren();
+  section.appendChild(el("div", "tm-row-title", "ComfyUI core"));
+  if (!info.is_git) {
+    section.appendChild(el("div", "tm-note tm-note-warn", "Core is not a git checkout — it cannot be updated from here."));
+    return;
+  }
+  const row = el("div", "tm-row");
+  row.appendChild(el("div", "tm-row-meta", `Ref: ${formatRef(info.ref)}`));
+  row.appendChild(el("div", "tm-row-meta", formatCoreBehind(info.behind)));
+  if (info.dirty)
+    row.appendChild(el("div", "tm-row-meta", "Working tree has local changes."));
+  if (info.remotes.origin)
+    row.appendChild(el("div", "tm-row-meta", `origin: ${info.remotes.origin}`));
+  if (info.remotes.upstream)
+    row.appendChild(el("div", "tm-row-meta", `upstream: ${info.remotes.upstream}`));
+  section.appendChild(row);
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Update core", "tm-btn-primary", () => void doCoreUpdate(state)));
+  if (rebootPermitted(state.config)) {
+    actions.appendChild(button("Restart ComfyUI", "tm-btn-danger", () => void doReboot(state)));
+  }
+  section.appendChild(actions);
+  section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo. Does not install Python dependencies or restart — do those yourself after."));
+}
+async function doReboot(state) {
+  const ok = await confirmAction("Restart ComfyUI?", "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.");
+  if (!ok)
+    return;
+  toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
+  section.appendChild(el("div", "tm-note tm-note-info", "The server is restarting. This page will reconnect once it is back; reload if it does not."));
+  try {
+    await apiPost("reboot", {});
+  } catch (e) {
+    if (e instanceof ManagerError) {
+      toast("error", "Restart failed", `${e.message}${e.code ? ` (${e.code})` : ""}`);
+      await renderCoreTab(state);
+    }
+  }
+}
+async function doCoreUpdate(state) {
+  const ok = await confirmAction("Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.");
+  if (!ok)
+    return;
+  state.shell.setBusy(true);
+  try {
+    const res = await apiPost("core/update", {});
+    markRestartPending(state);
+    const detail = res.deps_changed ? "requirements.txt changed — reinstall deps, then restart." : "Restart ComfyUI to apply.";
+    toast("success", "Core updated", detail);
+    await renderCoreTab(state);
+  } catch (e) {
+    const err = e;
+    toast("error", "Core update failed", `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+
+// src/index.ts
+var EXT_NAME2 = "comfyui-touch-manager";
+var OPEN_COMMAND_ID = "TouchManager.Open";
+function safeOpen() {
+  try {
+    openManager();
+  } catch (e) {
+    console.error(`[${EXT_NAME2}] failed to open node manager`, e);
+  }
+}
+app2.registerExtension({
+  name: "comfy.touch-manager",
+  settings: [
+    {
+      id: "TouchManager.AllowRemoteInstall",
+      name: "Touch Manager: allow install from URL on non-loopback binds",
+      tooltip: "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_INSTALL env + bind address are the real gate.",
+      type: "boolean",
+      defaultValue: false
+    }
+  ],
+  commands: [
+    {
+      id: OPEN_COMMAND_ID,
+      label: "Touch Node Manager",
+      icon: "pi pi-th-large",
+      function: () => safeOpen()
+    }
+  ],
+  menuCommands: [
+    {
+      path: ["Extensions"],
+      commands: [OPEN_COMMAND_ID]
+    }
+  ],
+  actionBarButtons: [
+    {
+      icon: "pi pi-th-large",
+      tooltip: "Touch Node Manager",
+      onClick: () => safeOpen()
+    }
+  ],
+  setup() {
+    try {
+      const em = app2.extensionManager;
+      em?.registerSidebarTab?.({
+        id: "touch-manager",
+        type: "custom",
+        title: "Node Manager",
+        icon: "pi pi-th-large",
+        tooltip: "Touch Node Manager",
+        render: (container) => {
+          container.replaceChildren();
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.textContent = "Open Node Manager";
+          btn.style.cssText = "margin:12px;min-height:44px;padding:10px 14px;font-size:15px;border-radius:8px;cursor:pointer;";
+          btn.addEventListener("click", safeOpen);
+          container.appendChild(btn);
+        }
+      });
+    } catch (e) {
+      console.warn(`[${EXT_NAME2}] sidebar tab registration failed`, e);
+    }
+  }
+});
+export {
+  versionOptions,
+  validateInstallUrl,
+  sanitizePackName,
+  formatUpdateStatus,
+  formatRef,
+  filterPacks
+};

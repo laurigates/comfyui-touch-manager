@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-touch-manager"
 description = "Touch-first node/extension manager for ComfyUI: check updates, update nodes and core, install from a GitHub URL, select versions, fuzzy search — mobile-friendly."
-version = "0.1.1"
+version = "0.1.2"
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"

@@ -12,8 +12,10 @@ fetch / ls-remote / clone-advance all run offline.
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import subprocess
+import zipfile
 
 import comfy.cli_args
 import folder_paths
@@ -883,6 +885,252 @@ def test_core_update_deps_changed_false(tmp_path):
 
     body = _post(pack.core_update).json_body
     assert body["deps_changed"] is False
+
+
+# ===========================================================================
+# Comfy Registry — pure guards
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("url", "ok"),
+    [
+        ("https://api.comfy.org/x/y.zip", True),
+        ("https://storage.googleapis.com/bucket/a.zip", True),
+        ("http://storage.googleapis.com/a.zip", False),  # not https
+        ("https://github.com/owner/repo/archive/main.zip", False),  # host not allowed
+        ("https://evil.example.com/a.zip", False),
+        ("ftp://storage.googleapis.com/a.zip", False),
+        (None, False),
+        (123, False),
+    ],
+)
+def test_validate_archive_url(url, ok):
+    assert pack._validate_archive_url(url) is ok
+
+
+@pytest.mark.parametrize("version", ["1.2.3", "v1.2.3", "1.0.0-rc.1", "2024.1.0+build"])
+def test_safe_version_accepts_normal(version):
+    assert pack._safe_version(version) == version
+
+
+@pytest.mark.parametrize("version", ["", None, 123, "-x", "../etc", "a/b", "a\\b", "x;y"])
+def test_safe_version_rejects_bad(version):
+    assert pack._safe_version(version) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("1", 1), ("5", 5), ("0", 1), ("-3", 1), ("nope", 1), (None, 1)]
+)
+def test_coerce_page(raw, expected):
+    assert pack._coerce_page(raw) == expected
+
+
+# ===========================================================================
+# GET /touch_manager/registry/search + /registry/versions (urllib mocked)
+# ===========================================================================
+
+
+def test_registry_search_normalizes(monkeypatch):
+    raw = {
+        "page": 1,
+        "totalPages": 3,
+        "nodes": [
+            {
+                "id": "comfyui-foo",
+                "name": "Foo",
+                "description": "does foo",
+                "downloads": 42,
+                "repository": "https://github.com/o/comfyui-foo",
+                "publisher": {"name": "octocat"},
+                "latest_version": {"version": "1.4.0"},
+            },
+            "not-a-dict",  # must be skipped
+        ],
+    }
+    monkeypatch.setattr(pack, "_registry_get", lambda path, params=None: raw)
+    body = _get(pack.registry_search, q="foo").json_body
+    assert body["ok"] is True
+    assert body["total_pages"] == 3
+    assert len(body["nodes"]) == 1
+    node = body["nodes"][0]
+    assert node["id"] == "comfyui-foo"
+    assert node["author"] == "octocat"
+    assert node["latest_version"] == "1.4.0"
+    assert node["downloads"] == 42
+
+
+def test_registry_search_upstream_failure_is_502(monkeypatch):
+    monkeypatch.setattr(pack, "_registry_get", lambda path, params=None: None)
+    resp = _get(pack.registry_search, q="foo")
+    assert resp.status == 502
+    assert resp.json_body["code"] == "registry_unavailable"
+
+
+def test_registry_versions_lists(monkeypatch):
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {
+            "versions": [
+                {"version": "1.0.0", "deprecated": False},
+                {"version": "0.9.0", "deprecated": True},
+                {"no_version": True},  # skipped
+            ]
+        },
+    )
+    body = _get(pack.registry_versions, id="comfyui-foo").json_body
+    assert [v["version"] for v in body["versions"]] == ["1.0.0", "0.9.0"]
+    assert body["versions"][1]["deprecated"] is True
+
+
+def test_registry_versions_invalid_id_is_400(monkeypatch):
+    resp = _get(pack.registry_versions, id="../evil")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "invalid_id"
+
+
+# ===========================================================================
+# POST /touch_manager/registry/install (download + safe extract)
+# ===========================================================================
+
+
+def _zip_bytes(members: dict[str, str]) -> bytes:
+    """Build an in-memory zip from {arcname: text}."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, text in members.items():
+            zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def _registry_install_setup(monkeypatch, tmp_path, archive: bytes):
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", raising=False)
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {"downloadUrl": "https://storage.googleapis.com/b/x.zip"},
+    )
+    monkeypatch.setattr(pack, "_fetch_bytes", lambda url, cap: archive)
+    return root
+
+
+def test_registry_install_happy_path(monkeypatch, tmp_path):
+    archive = _zip_bytes({"__init__.py": "# node\n", "requirements.txt": "numpy\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    body = _post(pack.registry_install, id="comfyui-foo", version="1.0.0").json_body
+
+    assert body["ok"] is True
+    assert body["source"] == "registry"
+    assert body["deps_changed"] is True
+    assert body["restart_required"] is True
+    target = root / "comfyui-foo"
+    assert (target / "__init__.py").is_file()
+    assert (target / "requirements.txt").is_file()
+    # No staging dirs left behind.
+    assert [p.name for p in root.iterdir()] == ["comfyui-foo"]
+
+
+def test_registry_install_unwraps_single_dir(monkeypatch, tmp_path):
+    archive = _zip_bytes({"comfyui-foo-1.0.0/__init__.py": "# node\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    _post(pack.registry_install, id="comfyui-foo")
+    assert (root / "comfyui-foo" / "__init__.py").is_file()
+
+
+def test_registry_install_rejects_zip_slip(monkeypatch, tmp_path):
+    archive = _zip_bytes({"../evil.txt": "pwned\n", "__init__.py": "x\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    resp = _post(pack.registry_install, id="comfyui-foo")
+    assert resp.status == 500
+    assert resp.json_body["code"] == "extract_failed"
+    assert not (root / "comfyui-foo").exists()
+    assert not (tmp_path / "evil.txt").exists()  # never escaped
+    # Staging cleaned up — only nothing (or no leftover) remains.
+    assert list(root.iterdir()) == []
+
+
+def test_registry_install_rejects_existing_target(monkeypatch, tmp_path):
+    archive = _zip_bytes({"__init__.py": "x\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    (root / "comfyui-foo").mkdir()
+    resp = _post(pack.registry_install, id="comfyui-foo")
+    assert resp.status == 409
+    assert resp.json_body["code"] == "exists"
+
+
+def test_registry_install_blocked_on_non_loopback(monkeypatch, tmp_path):
+    archive = _zip_bytes({"__init__.py": "x\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    resp = _post(pack.registry_install, id="comfyui-foo")
+    assert resp.status == 403
+    assert resp.json_body["code"] == "blocked_remote_bind"
+    assert not (root / "comfyui-foo").exists()
+
+
+def test_registry_install_invalid_version_is_400(monkeypatch, tmp_path):
+    archive = _zip_bytes({"__init__.py": "x\n"})
+    _registry_install_setup(monkeypatch, tmp_path, archive)
+    resp = _post(pack.registry_install, id="comfyui-foo", version="../bad")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "invalid_version"
+
+
+def test_registry_install_unsupported_download_host_is_502(monkeypatch, tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {"downloadUrl": "https://evil.example.com/x.zip"},
+    )
+    resp = _post(pack.registry_install, id="comfyui-foo")
+    assert resp.status == 502
+    assert resp.json_body["code"] == "invalid_archive_url"
+
+
+def test_registry_install_download_failure_degrades(monkeypatch, tmp_path):
+    def boom(url, cap):
+        raise ValueError("archive exceeds size cap")
+
+    root = _registry_install_setup(monkeypatch, tmp_path, b"")
+    monkeypatch.setattr(pack, "_fetch_bytes", boom)
+    resp = _post(pack.registry_install, id="comfyui-foo")
+    assert resp.status == 500
+    assert resp.json_body["code"] == "download_failed"
+    assert list(root.iterdir()) == []
+
+
+class _FakeResp:
+    def __init__(self, data):
+        self._d = data
+
+    def read(self, n=-1):
+        return self._d[:n] if n is not None and n >= 0 else self._d
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_fetch_bytes_enforces_cap(monkeypatch):
+    monkeypatch.setattr(pack.urllib.request, "urlopen", lambda *a, **k: _FakeResp(b"x" * 100))
+    with pytest.raises(ValueError, match="size cap"):
+        pack._fetch_bytes("https://storage.googleapis.com/x.zip", 10)
+
+
+def test_fetch_bytes_returns_data(monkeypatch):
+    monkeypatch.setattr(pack.urllib.request, "urlopen", lambda *a, **k: _FakeResp(b"hello"))
+    assert pack._fetch_bytes("https://storage.googleapis.com/x.zip", 1000) == b"hello"
 
 
 # ===========================================================================

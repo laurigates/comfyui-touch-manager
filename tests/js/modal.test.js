@@ -160,6 +160,66 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(document.body.textContent).toContain("feat: streamed change");
   });
 
+  it("searches the registry and installs a chosen version with source badges", async () => {
+    __responses["/touch_manager/registry/search"] = {
+      ok: true,
+      page: 1,
+      total_pages: 1,
+      nodes: [
+        {
+          id: "comfyui-foo",
+          name: "Foo Node",
+          description: "does foo things",
+          author: "octocat",
+          downloads: 1500,
+          icon: "",
+          repository: "https://github.com/octocat/comfyui-foo",
+          latest_version: "1.2.0",
+          publisher: "octocat",
+        },
+      ],
+    };
+    __responses["/touch_manager/registry/versions"] = {
+      ok: true,
+      id: "comfyui-foo",
+      versions: [{ version: "1.2.0", deprecated: false }],
+    };
+    __responses["/touch_manager/registry/install"] = {
+      ok: true,
+      name: "comfyui-foo",
+      version: "1.2.0",
+      source: "registry",
+      deps_changed: false,
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    // Open the Registry tab and search.
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Registry")?.click();
+    await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Search")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/registry/search"))).toBe(true);
+    expect(document.body.textContent).toContain("Foo Node");
+
+    // Open the version picker for the result.
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Versions")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/registry/versions"))).toBe(true);
+    // Both source badges appear: the repo git option + the registry version.
+    expect(document.body.textContent).toContain("git");
+    expect(document.body.textContent).toContain("registry");
+
+    // Install the registry version.
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Install")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/registry/install"))).toBe(true);
+  });
+
   it("hides the Restart button when the backend disallows reboot", async () => {
     __responses["/touch_manager/config"].reboot_allowed = false;
     __responses["/touch_manager/core"] = {

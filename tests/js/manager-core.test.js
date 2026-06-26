@@ -4,9 +4,12 @@ import { describe, expect, it } from "vitest";
 // plus the fuzzy-filter glue. No DOM — runs in the node environment.
 import {
   filterPacks,
+  formatCommitLine,
   formatCoreBehind,
+  formatDepsWarning,
   formatRef,
   formatUpdateStatus,
+  formatUpdateSummary,
   installPermitted,
   rebootPermitted,
   sanitizePackName,
@@ -168,6 +171,49 @@ describe("formatRef / formatUpdateStatus / formatCoreBehind", () => {
     expect(formatCoreBehind({ origin: 0, upstream: 0 })).toBe("up to date");
     expect(formatCoreBehind({ origin: 2, upstream: null })).toBe("2 behind origin");
     expect(formatCoreBehind({ origin: 2, upstream: 5 })).toBe("2 behind origin, 5 behind upstream");
+  });
+});
+
+describe("update-result formatting", () => {
+  const result = (over) => ({
+    name: "pack",
+    before_short: "abc1234",
+    after_short: "def5678",
+    commits_applied: 3,
+    commit_log: [],
+    changed_files: 5,
+    deps_changed: false,
+    truncated: false,
+    ...over,
+  });
+
+  it("summarises SHA transition, commit count, and file count", () => {
+    expect(formatUpdateSummary(result())).toBe("abc1234 → def5678 · 3 commits · 5 files changed");
+  });
+
+  it("singularises one commit / one file", () => {
+    expect(formatUpdateSummary(result({ commits_applied: 1, changed_files: 1 }))).toBe(
+      "abc1234 → def5678 · 1 commit · 1 file changed",
+    );
+  });
+
+  it("notes a truncated log", () => {
+    expect(formatUpdateSummary(result({ truncated: true }))).toContain("log truncated");
+  });
+
+  it("collapses to up-to-date when nothing was applied", () => {
+    expect(formatUpdateSummary(result({ commits_applied: 0 }))).toBe(
+      "Already up to date — nothing to apply.",
+    );
+  });
+
+  it("surfaces a deps warning only when requirements.txt changed", () => {
+    expect(formatDepsWarning(result({ deps_changed: false }))).toBeNull();
+    expect(formatDepsWarning(result({ deps_changed: true }))).toMatch(/requirements\.txt/);
+  });
+
+  it("formats a commit line as '<short> <subject>'", () => {
+    expect(formatCommitLine({ sha: "abc1234", subject: "fix: thing" })).toBe("abc1234 fix: thing");
   });
 });
 

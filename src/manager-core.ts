@@ -44,6 +44,24 @@ export interface UpdateInfo {
   error: string | null;
 }
 
+/** One applied commit in an UpdateResult log. */
+export interface CommitLogEntry {
+  sha: string;
+  subject: string;
+}
+
+/** The change detail returned by POST /touch_manager/update. */
+export interface UpdateResult {
+  name: string;
+  before_short: string | null;
+  after_short: string | null;
+  commits_applied: number;
+  commit_log: CommitLogEntry[];
+  changed_files: number;
+  deps_changed: boolean;
+  truncated: boolean;
+}
+
 /** One release of GET /touch_manager/versions. */
 export interface ReleaseInfo {
   tag: string;
@@ -238,6 +256,35 @@ export function formatUpdateStatus(info: UpdateInfo): string {
   }
   if (info.ahead > 0) return `${info.ahead} ahead (local commits)`;
   return "up to date";
+}
+
+/**
+ * One-line summary of what an update applied: short SHA transition, commit
+ * count, and changed-file count. Collapses to "already up to date" when the
+ * pack was already at the target (no commits applied).
+ */
+export function formatUpdateSummary(r: UpdateResult): string {
+  if (r.commits_applied === 0) return "Already up to date — nothing to apply.";
+  const parts: string[] = [];
+  if (r.before_short && r.after_short) parts.push(`${r.before_short} → ${r.after_short}`);
+  const commits = `${r.commits_applied} commit${r.commits_applied === 1 ? "" : "s"}`;
+  parts.push(r.truncated ? `${commits} (log truncated)` : commits);
+  if (r.changed_files > 0) {
+    parts.push(`${r.changed_files} file${r.changed_files === 1 ? "" : "s"} changed`);
+  }
+  return parts.join(" · ");
+}
+
+/** Warning string when an update changed requirements.txt, else null. */
+export function formatDepsWarning(r: UpdateResult): string | null {
+  return r.deps_changed
+    ? "requirements.txt changed — install Python dependencies manually, then restart."
+    : null;
+}
+
+/** Compact "<short> <subject>" line for a single applied commit. */
+export function formatCommitLine(entry: CommitLogEntry): string {
+  return `${entry.sha} ${entry.subject}`.trim();
 }
 
 /** Format core-repo behind counts ({origin, upstream}) into a label. */

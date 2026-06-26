@@ -10,10 +10,6 @@ a core route the frontend forgot to consume — a real interaction 404s at
 runtime with nothing catching it. This guards the contract by parsing route
 strings out of BOTH sources (no bundler, no browser) and asserting they line
 up. It mirrors comfyui-model-gallery's category-gate consistency test.
-
-``reboot`` is the one backend route with no frontend caller by design (an
-advanced, env-gated opt-in stub), so it is excluded from the "every backend
-route is consumed" direction.
 """
 
 from __future__ import annotations
@@ -27,8 +23,9 @@ PY_SRC = (ROOT / "touch_manager.py").read_text()
 # the entry barrel; read all of src/*.ts so a moved call is still covered.
 TS_SRC = "\n".join(p.read_text() for p in sorted((ROOT / "src").glob("*.ts")))
 
-# Backend routes registered with no frontend caller, by design.
-_BACKEND_ONLY = {"reboot"}
+# Backend routes registered with no frontend caller, by design. (None today —
+# every backend route, including reboot, now has a UI caller.)
+_BACKEND_ONLY: set[str] = set()
 
 
 def _backend_routes() -> set[str]:
@@ -67,15 +64,14 @@ def test_every_frontend_route_is_registered_in_the_backend() -> None:
 
 
 def test_every_backend_route_is_consumed_by_the_frontend() -> None:
-    # ``reboot`` is intentionally backend-only; every other route must have a
-    # frontend caller or it is dead surface.
+    # Every backend route must have a frontend caller or it is dead surface.
     be = _backend_routes() - _BACKEND_ONLY
     fe = _frontend_routes()
     unused = be - fe
     assert not unused, f"backend routes with no frontend caller: {sorted(unused)}"
 
 
-def test_reboot_is_backend_only() -> None:
-    # Pin the documented decision: reboot exists in the backend, not the UI.
+def test_reboot_is_consumed_by_the_frontend() -> None:
+    # The restart button wires the reboot route into the UI.
     assert "reboot" in _backend_routes()
-    assert "reboot" not in _frontend_routes()
+    assert "reboot" in _frontend_routes()

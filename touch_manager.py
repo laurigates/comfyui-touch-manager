@@ -243,9 +243,18 @@ def _remote_install_allowed() -> bool:
     return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL") == "1"
 
 
+def _remote_reboot_allowed() -> bool:
+    """True when the operator has opted into reboot on a non-loopback bind."""
+    return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT") == "1"
+
+
 def _reboot_allowed() -> bool:
-    """Reboot requires BOTH the env opt-in AND a loopback bind."""
-    return os.environ.get("TOUCH_MANAGER_ALLOW_REBOOT") == "1" and _is_loopback(_get_listen())
+    """Reboot is allowed on a loopback bind, or with the remote opt-in.
+
+    Mirrors the install gate: loopback is trusted by default; a non-loopback
+    bind additionally requires TOUCH_MANAGER_ALLOW_REMOTE_REBOOT=1.
+    """
+    return _is_loopback(_get_listen()) or _remote_reboot_allowed()
 
 
 def _sanitize_name(raw: str) -> str | None:
@@ -580,6 +589,7 @@ async def config(request: web.Request) -> web.Response:
             "allow_remote_install": _remote_install_allowed(),
             "is_loopback": _is_loopback(listen),
             "manager_enabled": True,
+            "reboot_allowed": _reboot_allowed(),
         }
     )
 
@@ -743,15 +753,17 @@ async def core_update(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.post("/touch_manager/reboot")
 async def reboot(request: web.Request) -> web.Response:
-    """Restart the server via os.execv — opt-in, disabled by default.
+    """Restart the server via os.execv.
 
-    Refuses unless BOTH TOUCH_MANAGER_ALLOW_REBOOT=1 AND a loopback bind. This
-    is an advanced escape hatch; the normal flow is for the user to restart.
+    Allowed on a loopback bind by default; a non-loopback bind additionally
+    requires TOUCH_MANAGER_ALLOW_REMOTE_REBOOT=1 (see _reboot_allowed). Refuses
+    with 403 otherwise.
     """
     if not _reboot_allowed():
         return _err("reboot disabled", "reboot_disabled", 403)
     # Replace the current process image with a fresh interpreter on the same
-    # argv. Unreachable in tests (the gate above is never satisfied there).
+    # argv. Tests monkeypatch os.execv so the gate can be exercised without
+    # actually replacing the process.
     os.execv(sys.executable, [sys.executable, *sys.argv])
     return web.json_response({"ok": True, "restart_required": True})  # pragma: no cover
 

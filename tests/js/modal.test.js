@@ -21,6 +21,7 @@ describe("openManager (jsdom modal smoke)", () => {
       allow_remote_install: true,
       is_loopback: true,
       manager_enabled: false,
+      reboot_allowed: true,
     };
     __responses["/touch_manager/installed"] = {
       ok: true,
@@ -55,5 +56,61 @@ describe("openManager (jsdom modal smoke)", () => {
 
     // Loaded data painted into the body — not an empty shell.
     expect(document.body.textContent).toContain("comfyui-touch-resize");
+  });
+
+  it("shows a Restart button on the Core tab and posts to /reboot when reboot is allowed", async () => {
+    __responses["/touch_manager/core"] = {
+      ok: true,
+      is_git: true,
+      ref: { type: "branch", name: "master", sha: "abc1234" },
+      behind: { origin: 0, upstream: 0 },
+      dirty: false,
+      remotes: { origin: "https://github.com/comfyanonymous/ComfyUI", upstream: null },
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    // Switch to the Core tab.
+    const coreTab = [...document.querySelectorAll("button")].find((b) => b.textContent === "Core");
+    coreTab?.click();
+    await flush();
+    await flush();
+
+    const restartBtn = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Restart ComfyUI",
+    );
+    expect(restartBtn).toBeTruthy();
+
+    restartBtn?.click();
+    await flush();
+    await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
+  });
+
+  it("hides the Restart button when the backend disallows reboot", async () => {
+    __responses["/touch_manager/config"].reboot_allowed = false;
+    __responses["/touch_manager/core"] = {
+      ok: true,
+      is_git: true,
+      ref: { type: "branch", name: "master", sha: "abc1234" },
+      behind: { origin: 0, upstream: 0 },
+      dirty: false,
+      remotes: { origin: null, upstream: null },
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    const coreTab = [...document.querySelectorAll("button")].find((b) => b.textContent === "Core");
+    coreTab?.click();
+    await flush();
+    await flush();
+
+    const restartBtn = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Restart ComfyUI",
+    );
+    expect(restartBtn).toBeFalsy();
   });
 });

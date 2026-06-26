@@ -65,6 +65,7 @@ export interface ManagerConfig {
   allow_remote_install: boolean;
   is_loopback: boolean;
   manager_enabled: boolean;
+  reboot_allowed: boolean;
 }
 
 /**
@@ -79,6 +80,17 @@ export interface ManagerConfig {
 export function installPermitted(config: ManagerConfig | null): boolean {
   if (!config) return true;
   return config.is_loopback || config.allow_remote_install;
+}
+
+/**
+ * Whether the Restart-ComfyUI control should be shown, reflecting the backend
+ * /reboot gate (loopback by default, or the TOUCH_MANAGER_ALLOW_REMOTE_REBOOT
+ * opt-in, reported as `reboot_allowed`). Unlike install, this defaults to
+ * HIDDEN until config loads — surfacing a restart button that the backend would
+ * reject is worse than briefly hiding an available one.
+ */
+export function rebootPermitted(config: ManagerConfig | null): boolean {
+  return config ? config.reboot_allowed : false;
 }
 
 /** GET /touch_manager/core. */

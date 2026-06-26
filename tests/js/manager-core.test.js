@@ -8,6 +8,7 @@ import {
   formatRef,
   formatUpdateStatus,
   installPermitted,
+  rebootPermitted,
   sanitizePackName,
   sortBranches,
   sortTags,
@@ -38,6 +39,29 @@ describe("installPermitted — mirror of the backend /install bind gate", () => 
 
   it("defaults to permitted when config has not loaded yet (backend still gates)", () => {
     expect(installPermitted(null)).toBe(true);
+  });
+});
+
+describe("rebootPermitted — mirror of the backend /reboot gate", () => {
+  const cfg = (reboot_allowed) => ({
+    allow_remote_install: false,
+    is_loopback: true,
+    manager_enabled: false,
+    reboot_allowed,
+  });
+
+  it("shows the restart control when the backend reports it allowed", () => {
+    expect(rebootPermitted(cfg(true))).toBe(true);
+  });
+
+  it("hides the restart control when the backend reports it disallowed", () => {
+    expect(rebootPermitted(cfg(false))).toBe(false);
+  });
+
+  it("defaults to hidden when config has not loaded yet", () => {
+    // Unlike install, reboot defaults to HIDDEN — never surface a button the
+    // backend would reject.
+    expect(rebootPermitted(null)).toBe(false);
   });
 });
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.2...comfyui-touch-manager-v0.1.3) (2026-06-26)
+
+
+### Bug Fixes
+
+* **dist:** commit web/dist so git-based updates carry the built frontend ([#11](https://github.com/laurigates/comfyui-touch-manager/issues/11)) ([01318b0](https://github.com/laurigates/comfyui-touch-manager/commit/01318b0a9468633a42d6e3d1449f10a3292792a3))
+* **updates:** skip disabled packs in the updates list ([#13](https://github.com/laurigates/comfyui-touch-manager/issues/13)) ([fbdc196](https://github.com/laurigates/comfyui-touch-manager/commit/fbdc196d9ba7ca28ad787f3b110c17d65f3aab97))
+
 ## [0.1.2](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.1...comfyui-touch-manager-v0.1.2) (2026-06-26)
 
 

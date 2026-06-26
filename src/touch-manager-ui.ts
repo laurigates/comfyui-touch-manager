@@ -27,6 +27,7 @@ import {
   type InstalledPack,
   installPermitted,
   type ManagerConfig,
+  rebootPermitted,
   type UpdateInfo,
   urlValidationHint,
   type VersionsInfo,
@@ -184,9 +185,20 @@ function emptyState(message: string): HTMLElement {
   return el("div", "tm-empty", message);
 }
 
-/** A prominent "restart required" banner prepended to a tab body. */
-function restartBanner(): HTMLElement {
-  return el("div", "tm-restart", "Restart ComfyUI to apply changes.");
+/**
+ * A prominent "restart required" banner prepended to a tab body. When the
+ * backend permits reboot (loopback, or the remote opt-in), it also offers a
+ * one-tap "Restart now" button.
+ */
+function restartBanner(state: ManagerState): HTMLElement {
+  const banner = el("div", "tm-restart");
+  banner.appendChild(el("div", undefined, "Restart ComfyUI to apply changes."));
+  if (rebootPermitted(state.config)) {
+    const actions = el("div", "tm-row-actions");
+    actions.appendChild(button("Restart now", "tm-btn-primary", () => void doReboot(state)));
+    banner.appendChild(actions);
+  }
+  return banner;
 }
 
 // ============================================================
@@ -297,7 +309,7 @@ async function renderActiveTab(state: ManagerState, id: TabId): Promise<void> {
 function resetBody(state: ManagerState): HTMLElement {
   const body = state.shell.bodyEl;
   body.replaceChildren();
-  if (state.restartPending) body.appendChild(restartBanner());
+  if (state.restartPending) body.appendChild(restartBanner(state));
   const section = el("div", "tm-section");
   body.appendChild(section);
   return section;
@@ -742,6 +754,9 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
 
   const actions = el("div", "tm-row-actions");
   actions.appendChild(button("Update core", "tm-btn-primary", () => void doCoreUpdate(state)));
+  if (rebootPermitted(state.config)) {
+    actions.appendChild(button("Restart ComfyUI", "tm-btn-danger", () => void doReboot(state)));
+  }
   section.appendChild(actions);
 
   section.appendChild(
@@ -751,6 +766,41 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
       "Runs git pull on the core repo. Does not install Python dependencies or restart — do those yourself after.",
     ),
   );
+}
+
+/**
+ * Restart the ComfyUI server via the backend /reboot route. The process is
+ * replaced by os.execv, so the POST typically never resolves (or errors as the
+ * connection drops) — we treat a dropped request as "restart in progress". A
+ * ManagerError means the backend refused (e.g. 403 reboot_disabled), which we
+ * surface instead.
+ */
+async function doReboot(state: ManagerState): Promise<void> {
+  const ok = await confirmAction(
+    "Restart ComfyUI?",
+    "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+  );
+  if (!ok) return;
+  toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
+  section.appendChild(
+    el(
+      "div",
+      "tm-note tm-note-info",
+      "The server is restarting. This page will reconnect once it is back; reload if it does not.",
+    ),
+  );
+  try {
+    await apiPost("reboot", {});
+  } catch (e) {
+    if (e instanceof ManagerError) {
+      toast("error", "Restart failed", `${e.message}${e.code ? ` (${e.code})` : ""}`);
+      await renderCoreTab(state);
+    }
+    // Otherwise the fetch dropped because the process was replaced mid-request
+    // (the expected success path) — leave the "Restarting…" view in place.
+  }
 }
 
 async function doCoreUpdate(state: ManagerState): Promise<void> {

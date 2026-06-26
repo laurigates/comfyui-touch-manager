@@ -232,6 +232,7 @@ def test_github_releases_empty_for_non_github():
 def test_config_loopback_default(monkeypatch):
     monkeypatch.setattr(comfy.cli_args.args, "listen", "")
     monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", raising=False)
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
     resp = _get(pack.config)
     assert resp.status == 200
     body = resp.json_body
@@ -239,14 +240,19 @@ def test_config_loopback_default(monkeypatch):
     assert body["is_loopback"] is True
     assert body["allow_remote_install"] is False
     assert body["manager_enabled"] is True
+    # Reboot is allowed on a loopback bind by default.
+    assert body["reboot_allowed"] is True
 
 
 def test_config_non_loopback_with_override(monkeypatch):
     monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
     monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", "1")
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
     body = _get(pack.config).json_body
     assert body["is_loopback"] is False
     assert body["allow_remote_install"] is True
+    # Reboot stays off on a non-loopback bind without its own opt-in.
+    assert body["reboot_allowed"] is False
 
 
 # ===========================================================================
@@ -751,9 +757,46 @@ def test_core_update_deps_changed_false(tmp_path):
 # ===========================================================================
 
 
-def test_reboot_disabled_by_default(monkeypatch):
-    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REBOOT", raising=False)
+def _patch_execv(monkeypatch):
+    """Record os.execv calls instead of replacing the test process."""
+    calls = []
+    monkeypatch.setattr(pack.os, "execv", lambda *a: calls.append(a))
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("listen", "remote_env", "expected"),
+    [
+        ("", None, True),  # loopback → allowed by default
+        ("127.0.0.1", None, True),
+        ("0.0.0.0", None, False),  # non-loopback, no opt-in → denied
+        ("0.0.0.0", "1", True),  # non-loopback + remote opt-in → allowed
+        ("192.168.1.10", None, False),
+    ],
+)
+def test_reboot_gate_predicate(monkeypatch, listen, remote_env, expected):
+    monkeypatch.setattr(comfy.cli_args.args, "listen", listen)
+    if remote_env is None:
+        monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
+    else:
+        monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", remote_env)
+    assert pack._reboot_allowed() is expected
+
+
+def test_reboot_allowed_on_loopback(monkeypatch):
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
     monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    calls = _patch_execv(monkeypatch)
+    resp = _post(pack.reboot)
+    # The gate passed: execv was reached (mocked) and the handler returned ok.
+    assert len(calls) == 1
+    assert resp.json_body["ok"] is True
+
+
+def test_reboot_disabled_on_non_loopback_without_env(monkeypatch):
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    calls = _patch_execv(monkeypatch)
     resp = _post(pack.reboot)
     assert resp.status == 403
     assert resp.json_body == {
@@ -761,15 +804,16 @@ def test_reboot_disabled_by_default(monkeypatch):
         "error": "reboot disabled",
         "code": "reboot_disabled",
     }
+    assert calls == []  # execv never reached
 
 
-def test_reboot_disabled_on_non_loopback_even_with_env(monkeypatch):
-    # Both conditions are required: env opt-in is not enough off loopback.
-    monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REBOOT", "1")
+def test_reboot_allowed_on_non_loopback_with_remote_env(monkeypatch):
+    monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", "1")
     monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    calls = _patch_execv(monkeypatch)
     resp = _post(pack.reboot)
-    assert resp.status == 403
-    assert resp.json_body["code"] == "reboot_disabled"
+    assert len(calls) == 1
+    assert resp.json_body["ok"] is True
 
 
 # ===========================================================================

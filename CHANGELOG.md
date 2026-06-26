@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.1...comfyui-touch-manager-v0.1.2) (2026-06-26)
+
+
+### Features
+
+* add Restart ComfyUI button with relaxed reboot gating ([6697b97](https://github.com/laurigates/comfyui-touch-manager/commit/6697b97b77d57108b795b8372efa28bc3e556240))
+* progressive update checking with live progress ([bf6393d](https://github.com/laurigates/comfyui-touch-manager/commit/bf6393dd7e18f934d03d77b71f1a770c0d2d6ecb))
+* search and install nodes from the Comfy Registry ([e1820ef](https://github.com/laurigates/comfyui-touch-manager/commit/e1820ef52d95a3de914bede6afae69c5dd42c1f0))
+* surface what changed when updating a node pack ([c9a4a77](https://github.com/laurigates/comfyui-touch-manager/commit/c9a4a7747f9295495b2709ab9f018a089e7eb7ba))
+
 ## [0.1.1](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.0...comfyui-touch-manager-v0.1.1) (2026-06-25)
 
 

@@ -617,6 +617,82 @@ def test_update_checks_out_explicit_ref(tmp_path):
     assert ref["name"] == "v9.9.9"
 
 
+def test_update_returns_change_detail(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed)  # one new commit on origin
+    _set_roots(root)
+
+    before = _git(root / "pack", "rev-parse", "HEAD").stdout.strip()
+    body = _post(pack.update, name="pack").json_body
+    after = _git(root / "pack", "rev-parse", "HEAD").stdout.strip()
+
+    assert body["commits_applied"] == 1
+    assert body["before_short"] == before[:7]
+    assert body["after_short"] == after[:7]
+    assert body["changed_files"] >= 1
+    assert body["deps_changed"] is False
+    assert body["truncated"] is False
+    assert len(body["commit_log"]) == 1
+    entry = body["commit_log"][0]
+    assert entry["sha"] and entry["subject"] == "c2"
+
+
+def test_update_reports_deps_changed(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed, fname="requirements.txt", content="numpy\n")
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["deps_changed"] is True
+
+
+def test_update_commit_log_is_capped(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    # Advance origin by more commits than the log cap.
+    for i in range(pack._UPDATE_LOG_CAP + 5):
+        _advance(seed, content=f"line {i}\n")
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["commits_applied"] == pack._UPDATE_LOG_CAP + 5
+    assert len(body["commit_log"]) == pack._UPDATE_LOG_CAP
+    assert body["truncated"] is True
+
+
+def test_update_no_op_reports_zero_commits(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")  # already at origin's tip
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["commits_applied"] == 0
+    assert body["commit_log"] == []
+    assert body["before_short"] == body["after_short"]
+
+
 def test_update_rejects_option_injection_ref_before_fetch(monkeypatch, tmp_path):
     # An option-injection ref must be rejected before fetch/checkout run.
     root = tmp_path / "cn"

@@ -21,14 +21,18 @@ import { app } from "/scripts/app.js";
 import {
   type CoreInfo,
   filterPacks,
+  formatCommitLine,
   formatCoreBehind,
+  formatDepsWarning,
   formatRef,
   formatUpdateStatus,
+  formatUpdateSummary,
   type InstalledPack,
   installPermitted,
   type ManagerConfig,
   rebootPermitted,
   type UpdateInfo,
+  type UpdateResult,
   urlValidationHint,
   type VersionsInfo,
   validateInstallUrl,
@@ -404,15 +408,36 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
 async function doUpdate(state: ManagerState, name: string, ref?: string): Promise<void> {
   state.shell.setBusy(true);
   try {
-    await apiPost("update", ref ? { name, ref } : { name });
+    const result = await apiPost<UpdateResult>("update", ref ? { name, ref } : { name });
     markRestartPending(state);
-    toast("success", `Updated ${name}`, "Restart ComfyUI to apply.");
-    await renderInstalledTab(state);
+    toast("success", `Updated ${name}`, formatUpdateSummary(result));
+    state.shell.setBusy(false);
+    renderUpdateResult(state, { ...result, name });
   } catch (e) {
     const err = e as ManagerError;
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
-  } finally {
     state.shell.setBusy(false);
+  }
+}
+
+/** A panel summarising exactly what an update applied (SHAs, commits, files). */
+function renderUpdateResult(state: ManagerState, result: UpdateResult): void {
+  const section = resetBody(state);
+  section.appendChild(button("← Back to installed", "", () => void renderInstalledTab(state)));
+  section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
+  section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
+
+  const depsWarning = formatDepsWarning(result);
+  if (depsWarning) section.appendChild(el("div", "tm-note tm-note-warn", depsWarning));
+
+  if (result.commit_log.length > 0) {
+    section.appendChild(el("div", "tm-field-label", "Applied commits"));
+    const list = el("div", "tm-list");
+    for (const entry of result.commit_log) {
+      list.appendChild(el("div", "tm-row-meta", formatCommitLine(entry)));
+    }
+    if (result.truncated) list.appendChild(el("div", "tm-row-meta", "…older commits omitted"));
+    section.appendChild(list);
   }
 }
 

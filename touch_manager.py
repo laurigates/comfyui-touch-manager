@@ -37,6 +37,7 @@ Security perimeter (enforced here, surfaced in the frontend via /config):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -67,6 +68,10 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _LOOPBACK = {"", "127.0.0.1", "localhost", "::1"}
 
 _DISABLED_SUFFIX = ".disabled"
+
+# Cap the per-update commit log so the response stays bounded on a pack that
+# fast-forwards over a large history.
+_UPDATE_LOG_CAP = 20
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +560,66 @@ def _do_core_pull(cwd: str) -> tuple[int, bool, str]:
     return 0, deps_changed, ""
 
 
+def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | None, str, str]:
+    """Fetch then checkout/fast-forward one pack, capturing what changed.
+
+    Returns (result, "", "") on success, or (None, error, code) on failure
+    (code is "fetch_failed" or "checkout_failed"). ``result`` carries the
+    before/after sha, the count + capped log of applied commits, the changed
+    file count, and whether requirements.txt changed. The sha range is built
+    from values git produced — never caller input — so it is safe to interpolate.
+    """
+    rc, before_out, _ = _git(["rev-parse", "HEAD"], full)
+    before = before_out.strip() if rc == 0 else ""
+
+    rc, _, err = _git(["fetch", "--all", "--tags"], full, timeout=120)
+    if rc != 0:
+        return None, err.strip() or "fetch failed", "fetch_failed"
+
+    if safe_ref:
+        rc, _, err = _git(["checkout", safe_ref], full, timeout=60)
+    else:
+        rc, _, err = _git(["merge", "--ff-only", "@{u}"], full, timeout=60)
+    if rc != 0:
+        return None, err.strip() or "checkout failed", "checkout_failed"
+
+    rc, after_out, _ = _git(["rev-parse", "HEAD"], full)
+    after = after_out.strip() if rc == 0 else ""
+
+    result: dict[str, Any] = {
+        "before": before or None,
+        "after": after or None,
+        "before_short": before[:7] or None,
+        "after_short": after[:7] or None,
+        "commits_applied": 0,
+        "commit_log": [],
+        "changed_files": 0,
+        "deps_changed": False,
+        "truncated": False,
+    }
+    if before and after and before != after:
+        rng = f"{before}..{after}"
+        rc, count, _ = _git(["rev-list", "--count", rng], full)
+        if rc == 0:
+            with contextlib.suppress(ValueError):
+                result["commits_applied"] = int(count.strip())
+        rc, logout, _ = _git(["log", f"-n{_UPDATE_LOG_CAP}", "--pretty=format:%h\t%s", rng], full)
+        if rc == 0:
+            entries: list[dict[str, str]] = []
+            for line in logout.splitlines():
+                sha, _, subject = line.partition("\t")
+                if sha:
+                    entries.append({"sha": sha, "subject": subject})
+            result["commit_log"] = entries
+            result["truncated"] = result["commits_applied"] > len(entries)
+        rc, names, _ = _git(["diff", "--name-only", before, after], full)
+        if rc == 0:
+            files = [line for line in names.splitlines() if line.strip()]
+            result["changed_files"] = len(files)
+            result["deps_changed"] = any(f.endswith("requirements.txt") for f in files)
+    return result, "", ""
+
+
 # ---------------------------------------------------------------------------
 # Response helpers
 # ---------------------------------------------------------------------------
@@ -695,18 +760,11 @@ async def update(request: web.Request) -> web.Response:
     if ref and safe_ref is None:
         return _err("invalid ref", "checkout_failed", 400)
 
-    rc, _, err = await _run(_git, ["fetch", "--all", "--tags"], full, 120)
-    if rc != 0:
-        return _err(err.strip() or "fetch failed", "fetch_failed", 500)
+    result, err, code = await _run(_do_pack_update, full, safe_ref)
+    if result is None:
+        return _err(err, code, 500)
 
-    if safe_ref:
-        rc, _, err = await _run(_git, ["checkout", safe_ref], full, 60)
-    else:
-        rc, _, err = await _run(_git, ["merge", "--ff-only", "@{u}"], full, 60)
-    if rc != 0:
-        return _err(err.strip() or "checkout failed", "checkout_failed", 500)
-
-    return web.json_response({"ok": True, "name": name, "restart_required": True})
+    return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
 
 
 @PromptServer.instance.routes.post("/touch_manager/uninstall")

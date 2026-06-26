@@ -89,6 +89,40 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
   });
 
+  it("renders an update result panel with the commit log after an update", async () => {
+    __responses["/touch_manager/update"] = {
+      ok: true,
+      name: "comfyui-touch-resize",
+      before_short: "abc1234",
+      after_short: "def5678",
+      commits_applied: 2,
+      commit_log: [
+        { sha: "def5678", subject: "feat: add thing" },
+        { sha: "0001abc", subject: "fix: bug" },
+      ],
+      changed_files: 3,
+      deps_changed: true,
+      truncated: false,
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    // Update the pack from its Installed row.
+    const updateBtn = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Update",
+    );
+    updateBtn?.click();
+    await flush();
+    await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
+    expect(document.body.textContent).toContain("feat: add thing");
+    expect(document.body.textContent).toContain("fix: bug");
+    // deps_changed surfaces the dependency warning.
+    expect(document.body.textContent).toMatch(/requirements\.txt/);
+  });
+
   it("hides the Restart button when the backend disallows reboot", async () => {
     __responses["/touch_manager/config"].reboot_allowed = false;
     __responses["/touch_manager/core"] = {

@@ -472,8 +472,12 @@ def _collect_installed() -> list[dict[str, Any]]:
     return packs
 
 
-def _collect_updates() -> list[dict[str, Any]]:
-    """For each git pack: fetch, then report behind/ahead vs upstream."""
+def _list_git_packs() -> list[dict[str, Any]]:
+    """Names of every git pack across roots (no fetch — for fast listing).
+
+    Lets the frontend paint the update-check skeleton instantly and then check
+    each pack one at a time, streaming results in.
+    """
     out: list[dict[str, Any]] = []
     for root in _custom_nodes_roots():
         for entry in _iter_pack_dirs(root):
@@ -481,29 +485,44 @@ def _collect_updates() -> list[dict[str, Any]]:
             if not _is_git(full):
                 continue
             name = entry[: -len(_DISABLED_SUFFIX)] if entry.endswith(_DISABLED_SUFFIX) else entry
-            rc, _, err = _git(["fetch", "--quiet"], full, timeout=60)
-            if rc != 0:
-                out.append(
-                    {
-                        "name": name,
-                        "update_available": False,
-                        "behind": 0,
-                        "ahead": 0,
-                        "error": err.strip() or "fetch failed",
-                    }
-                )
-                continue
-            ahead, behind, err2 = _ahead_behind(full)
-            out.append(
-                {
-                    "name": name,
-                    "update_available": behind > 0,
-                    "behind": behind,
-                    "ahead": ahead,
-                    "error": err2,
-                }
-            )
+            out.append({"name": name})
     return out
+
+
+def _check_one_update(full: str, name: str) -> dict[str, Any]:
+    """Fetch ONE pack and report behind/ahead plus a short incoming commit log.
+
+    Same per-pack shape as _collect_updates, with an extra ``incoming`` preview
+    so the UI can show what an update would bring. Degrades per-pack: a fetch
+    failure surfaces in ``error`` rather than raising.
+    """
+    rc, _, err = _git(["fetch", "--quiet"], full, timeout=60)
+    if rc != 0:
+        return {
+            "name": name,
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "error": err.strip() or "fetch failed",
+            "incoming": [],
+        }
+    ahead, behind, err2 = _ahead_behind(full)
+    incoming: list[dict[str, str]] = []
+    if behind > 0:
+        rc, logout, _ = _git(["log", "-n5", "--pretty=format:%h\t%s", "HEAD..@{u}"], full)
+        if rc == 0:
+            for line in logout.splitlines():
+                sha, _, subject = line.partition("\t")
+                if sha:
+                    incoming.append({"sha": sha, "subject": subject})
+    return {
+        "name": name,
+        "update_available": behind > 0,
+        "behind": behind,
+        "ahead": ahead,
+        "error": err2,
+        "incoming": incoming,
+    }
 
 
 def _collect_versions(cwd: str, remote: str | None) -> tuple[list[str], list[str]]:
@@ -666,11 +685,26 @@ async def installed(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "packs": packs})
 
 
-@PromptServer.instance.routes.get("/touch_manager/updates")
-async def updates(request: web.Request) -> web.Response:
-    """Per-pack update availability (fetches each git pack; degrades per-pack)."""
-    packs = await _run(_collect_updates)
+@PromptServer.instance.routes.get("/touch_manager/updates/list")
+async def updates_list(request: web.Request) -> web.Response:
+    """Fast list of git-pack names (no fetch) so the UI can stream checks."""
+    packs = await _run(_list_git_packs)
     return web.json_response({"ok": True, "packs": packs})
+
+
+@PromptServer.instance.routes.get("/touch_manager/updates/check")
+async def updates_check(request: web.Request) -> web.Response:
+    """Check ONE pack for updates (git fetch + ahead/behind + incoming log)."""
+    name = _sanitize_name(request.rel_url.query.get("name", ""))
+    if not name:
+        return _err("missing or invalid name", "not_found", 400)
+    full = _find_pack(name)
+    if not full:
+        return _err("not found", "not_found", 404)
+    if not await _run(_is_git, full):
+        return _err("not a git repository", "not_git", 400)
+    result = await _run(_check_one_update, full, name)
+    return web.json_response({"ok": True, **result})
 
 
 @PromptServer.instance.routes.get("/touch_manager/versions")

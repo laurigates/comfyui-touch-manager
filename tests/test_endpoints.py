@@ -354,11 +354,26 @@ def test_parse_ref_branch_tag_detached(tmp_path):
 
 
 # ===========================================================================
-# GET /touch_manager/updates — behind/ahead via a local origin
+# GET /touch_manager/updates/list + /updates/check — progressive checking
 # ===========================================================================
 
 
-def test_updates_reports_behind(tmp_path):
+def test_updates_list_returns_git_packs_only(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "gitpack")
+    (root / "plain").mkdir()  # not a git repo — must be skipped
+    _set_roots(root)
+
+    names = [p["name"] for p in _get(pack.updates_list).json_body["packs"]]
+    assert names == ["gitpack"]
+
+
+def test_updates_check_reports_behind_with_incoming(tmp_path):
     root = tmp_path / "cn"
     root.mkdir()
     origin = tmp_path / "origin.git"
@@ -366,19 +381,19 @@ def test_updates_reports_behind(tmp_path):
     seed = tmp_path / "seed"
     _init_seed(seed, origin)
     _clone(origin, root / "pack")
-    _advance(seed)  # origin now one commit ahead of the cloned pack
-
+    _advance(seed)  # one commit ahead on origin
     _set_roots(root)
-    resp = _get(pack.updates)
-    assert resp.status == 200
-    entry = {p["name"]: p for p in resp.json_body["packs"]}["pack"]
-    assert entry["update_available"] is True
-    assert entry["behind"] == 1
-    assert entry["ahead"] == 0
-    assert entry["error"] is None
+
+    body = _get(pack.updates_check, name="pack").json_body
+    assert body["ok"] is True
+    assert body["update_available"] is True
+    assert body["behind"] == 1
+    assert body["error"] is None
+    assert len(body["incoming"]) == 1
+    assert body["incoming"][0]["subject"] == "c2"
 
 
-def test_updates_up_to_date(tmp_path):
+def test_updates_check_up_to_date(tmp_path):
     root = tmp_path / "cn"
     root.mkdir()
     origin = tmp_path / "origin.git"
@@ -386,11 +401,53 @@ def test_updates_up_to_date(tmp_path):
     seed = tmp_path / "seed"
     _init_seed(seed, origin)
     _clone(origin, root / "pack")
-
     _set_roots(root)
-    entry = {p["name"]: p for p in _get(pack.updates).json_body["packs"]}["pack"]
-    assert entry["update_available"] is False
-    assert entry["behind"] == 0
+
+    body = _get(pack.updates_check, name="pack").json_body
+    assert body["update_available"] is False
+    assert body["behind"] == 0
+    assert body["incoming"] == []
+
+
+def test_updates_check_invalid_name_is_400(tmp_path):
+    _set_roots(tmp_path)
+    resp = _get(pack.updates_check, name="../evil")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "not_found"
+
+
+def test_updates_check_not_git_is_400(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "plain").mkdir()
+    _set_roots(root)
+    resp = _get(pack.updates_check, name="plain")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "not_git"
+
+
+def test_updates_check_fetch_failure_degrades(monkeypatch, tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _set_roots(root)
+
+    real_git = pack._git
+
+    def flaky_git(args, cwd, timeout=60):
+        if args[:1] == ["fetch"]:
+            return 1, "", "network down"
+        return real_git(args, cwd, timeout)
+
+    monkeypatch.setattr(pack, "_git", flaky_git)
+    resp = _get(pack.updates_check, name="pack")
+    assert resp.status == 200  # per-pack degradation, not a hard failure
+    assert resp.json_body["error"] == "network down"
+    assert resp.json_body["update_available"] is False
 
 
 # ===========================================================================

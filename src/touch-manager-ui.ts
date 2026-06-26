@@ -24,15 +24,18 @@ import {
   formatCommitLine,
   formatCoreBehind,
   formatDepsWarning,
+  formatProgress,
   formatRef,
   formatUpdateStatus,
   formatUpdateSummary,
   type InstalledPack,
   installPermitted,
   type ManagerConfig,
+  partitionUpdateResults,
   rebootPermitted,
-  type UpdateInfo,
+  type UpdateCheckResult,
   type UpdateResult,
+  type UpdatesListEntry,
   urlValidationHint,
   type VersionsInfo,
   validateInstallUrl,
@@ -556,52 +559,93 @@ async function renderUpdatesTab(state: ManagerState): Promise<void> {
   );
 }
 
+/** A single Updates-tab row for a pack with an available update. */
+function updateRow(state: ManagerState, info: UpdateCheckResult): HTMLElement {
+  const r = el("div", "tm-row");
+  r.appendChild(el("div", "tm-row-title", info.name));
+  r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
+  for (const c of info.incoming) {
+    r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
+  }
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name)));
+  r.appendChild(actions);
+  return r;
+}
+
+// How many per-pack checks run concurrently. Small, so a long fetch can't stall
+// the whole sweep while still bounding the load on the git remotes.
+const UPDATE_CHECK_CONCURRENCY = 3;
+
+/**
+ * Progressive update check: fetch the git-pack names fast, then check each pack
+ * one at a time (bounded concurrency), streaming rows into the list and ticking
+ * a "checked N/M" progress label as results arrive.
+ */
 async function checkUpdates(state: ManagerState): Promise<void> {
   const section = resetBody(state);
   section.appendChild(
     button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)),
   );
-  const loading = emptyState("Checking… (git fetch per pack, may take a moment)");
-  section.appendChild(loading);
-  state.shell.setBusy(true);
-  let updates: UpdateInfo[];
+
+  let names: string[];
   try {
-    const data = await apiGet<{ packs: UpdateInfo[] }>("updates");
-    updates = data.packs ?? [];
+    const data = await apiGet<{ packs: UpdatesListEntry[] }>("updates/list");
+    names = (data.packs ?? []).map((p) => p.name);
   } catch (e) {
-    loading.remove();
     section.appendChild(emptyState(`Failed: ${(e as Error).message}`));
-    state.shell.setBusy(false);
     return;
-  } finally {
-    state.shell.setBusy(false);
   }
-  loading.remove();
 
-  const actionable = updates.filter((u) => u.update_available);
-  const errored = updates.filter((u) => u.error);
+  if (names.length === 0) {
+    section.appendChild(emptyState("No git-backed packs to check."));
+    return;
+  }
 
-  if (actionable.length === 0) {
-    section.appendChild(emptyState("Everything is up to date."));
-  } else {
-    const list = el("div", "tm-list");
-    for (const u of actionable) {
-      const r = el("div", "tm-row");
-      r.appendChild(el("div", "tm-row-title", u.name));
-      r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(u)));
-      const actions = el("div", "tm-row-actions");
-      actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, u.name)));
-      r.appendChild(actions);
-      list.appendChild(r);
+  const total = names.length;
+  state.shell.setStatus(formatProgress(0, total));
+  const list = el("div", "tm-list");
+  section.appendChild(list);
+  const errors = el("div", "tm-section");
+
+  const results: UpdateCheckResult[] = [];
+  let done = 0;
+  let cursor = 0;
+
+  const worker = async (): Promise<void> => {
+    while (cursor < names.length) {
+      const name = names[cursor++];
+      if (name === undefined) break;
+      let info: UpdateCheckResult;
+      try {
+        info = await apiGet<UpdateCheckResult>(`updates/check?name=${encodeURIComponent(name)}`);
+      } catch (e) {
+        info = {
+          name,
+          update_available: false,
+          behind: 0,
+          ahead: 0,
+          error: (e as Error).message,
+          incoming: [],
+        };
+      }
+      results.push(info);
+      if (info.update_available && !info.error) list.appendChild(updateRow(state, info));
+      else if (info.error)
+        errors.appendChild(el("div", "tm-row-meta", `${info.name}: ${info.error}`));
+      state.shell.setStatus(formatProgress(++done, total));
     }
-    section.appendChild(list);
-  }
+  };
 
+  await Promise.all(
+    Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()),
+  );
+
+  const { actionable, errored } = partitionUpdateResults(results);
+  if (actionable.length === 0) list.appendChild(emptyState("Everything is up to date."));
   if (errored.length > 0) {
     section.appendChild(el("div", "tm-field-label", "Could not check"));
-    for (const u of errored) {
-      section.appendChild(el("div", "tm-row-meta", `${u.name}: ${u.error}`));
-    }
+    section.appendChild(errors);
   }
 }
 

@@ -62,6 +62,39 @@ export interface UpdateResult {
   truncated: boolean;
 }
 
+/** One row of GET /touch_manager/updates/list. */
+export interface UpdatesListEntry {
+  name: string;
+}
+
+/** GET /touch_manager/updates/check?name=<pack> — per-pack result. */
+export interface UpdateCheckResult extends UpdateInfo {
+  /** Short preview of the commits an update would bring (may be empty). */
+  incoming: CommitLogEntry[];
+}
+
+/** Progress label for the incremental update check, e.g. "checked 3/12". */
+export function formatProgress(done: number, total: number): string {
+  return `checked ${done}/${total}`;
+}
+
+/** Split per-pack check results into the three buckets the UI renders. */
+export function partitionUpdateResults(results: readonly UpdateCheckResult[]): {
+  actionable: UpdateCheckResult[];
+  errored: UpdateCheckResult[];
+  upToDate: UpdateCheckResult[];
+} {
+  const actionable: UpdateCheckResult[] = [];
+  const errored: UpdateCheckResult[] = [];
+  const upToDate: UpdateCheckResult[] = [];
+  for (const r of results) {
+    if (r.error) errored.push(r);
+    else if (r.update_available) actionable.push(r);
+    else upToDate.push(r);
+  }
+  return { actionable, errored, upToDate };
+}
+
 /** One release of GET /touch_manager/versions. */
 export interface ReleaseInfo {
   tag: string;

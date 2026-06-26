@@ -123,6 +123,43 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(document.body.textContent).toMatch(/requirements\.txt/);
   });
 
+  it("streams update rows from per-pack checks on the Updates tab", async () => {
+    __responses["/touch_manager/updates/list"] = {
+      ok: true,
+      packs: [{ name: "pack-a" }, { name: "pack-b" }],
+    };
+    __responses["/touch_manager/updates/check"] = {
+      ok: true,
+      name: "pack-a",
+      update_available: true,
+      behind: 1,
+      ahead: 0,
+      error: null,
+      incoming: [{ sha: "abc1234", subject: "feat: streamed change" }],
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    const updatesTab = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Updates",
+    );
+    updatesTab?.click();
+    await flush();
+
+    const checkBtn = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Check for updates",
+    );
+    checkBtn?.click();
+    // Let the list fetch + both per-pack checks settle.
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/updates/list"))).toBe(true);
+    const checks = __fetchCalls.filter((u) => u.includes("/touch_manager/updates/check"));
+    expect(checks.length).toBe(2); // one per listed pack
+    expect(document.body.textContent).toContain("feat: streamed change");
+  });
+
   it("hides the Restart button when the backend disallows reboot", async () => {
     __responses["/touch_manager/config"].reboot_allowed = false;
     __responses["/touch_manager/core"] = {

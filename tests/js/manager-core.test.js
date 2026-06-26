@@ -7,10 +7,12 @@ import {
   formatCommitLine,
   formatCoreBehind,
   formatDepsWarning,
+  formatProgress,
   formatRef,
   formatUpdateStatus,
   formatUpdateSummary,
   installPermitted,
+  partitionUpdateResults,
   rebootPermitted,
   sanitizePackName,
   sortBranches,
@@ -214,6 +216,35 @@ describe("update-result formatting", () => {
 
   it("formats a commit line as '<short> <subject>'", () => {
     expect(formatCommitLine({ sha: "abc1234", subject: "fix: thing" })).toBe("abc1234 fix: thing");
+  });
+});
+
+describe("progressive update-check helpers", () => {
+  it("formats the progress label", () => {
+    expect(formatProgress(0, 12)).toBe("checked 0/12");
+    expect(formatProgress(3, 12)).toBe("checked 3/12");
+  });
+
+  it("partitions results into actionable / errored / up-to-date", () => {
+    const mk = (over) => ({
+      name: "p",
+      update_available: false,
+      behind: 0,
+      ahead: 0,
+      error: null,
+      incoming: [],
+      ...over,
+    });
+    const { actionable, errored, upToDate } = partitionUpdateResults([
+      mk({ name: "a", update_available: true, behind: 2 }),
+      mk({ name: "b", error: "boom" }),
+      mk({ name: "c" }),
+      // An errored row is errored even if update_available somehow set.
+      mk({ name: "d", update_available: true, error: "x" }),
+    ]);
+    expect(actionable.map((r) => r.name)).toEqual(["a"]);
+    expect(errored.map((r) => r.name)).toEqual(["b", "d"]);
+    expect(upToDate.map((r) => r.name)).toEqual(["c"]);
   });
 });
 

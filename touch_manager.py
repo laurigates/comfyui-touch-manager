@@ -664,11 +664,15 @@ def _list_git_packs() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for root in _custom_nodes_roots():
         for entry in _iter_pack_dirs(root):
+            # Skip disabled packs: updates/check resolves names via _find_pack
+            # (without include_disabled), so listing a ".disabled" pack here only
+            # produces a phantom row that errors "not found" on check.
+            if entry.endswith(_DISABLED_SUFFIX):
+                continue
             full = os.path.join(root, entry)
             if not _is_git(full):
                 continue
-            name = entry[: -len(_DISABLED_SUFFIX)] if entry.endswith(_DISABLED_SUFFIX) else entry
-            out.append({"name": name})
+            out.append({"name": entry})
     return out
 
 

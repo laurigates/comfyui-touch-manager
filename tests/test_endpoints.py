@@ -369,9 +369,12 @@ def test_updates_list_returns_git_packs_only(tmp_path):
     _init_seed(seed, origin)
     _clone(origin, root / "gitpack")
     (root / "plain").mkdir()  # not a git repo — must be skipped
+    _clone(origin, root / "off.disabled")  # disabled git pack — must be skipped
     _set_roots(root)
 
     names = [p["name"] for p in _get(pack.updates_list).json_body["packs"]]
+    # Disabled packs are excluded: updates/check (_find_pack without
+    # include_disabled) cannot resolve them, so listing one is a phantom row.
     assert names == ["gitpack"]
 
 

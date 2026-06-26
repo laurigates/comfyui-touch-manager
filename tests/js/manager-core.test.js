@@ -7,11 +7,16 @@ import {
   formatCommitLine,
   formatCoreBehind,
   formatDepsWarning,
+  formatDownloads,
   formatProgress,
   formatRef,
+  formatRegistryMeta,
   formatUpdateStatus,
   formatUpdateSummary,
+  iconForKind,
   installPermitted,
+  mergeVersionEntries,
+  normalizeRegistryNode,
   partitionUpdateResults,
   rebootPermitted,
   sanitizePackName,
@@ -276,6 +281,76 @@ describe("ref / version sorting", () => {
     expect(opts.filter((r) => r === "main")).toHaveLength(1);
     // v2.0.0 sorts before v1.0.0.
     expect(opts.indexOf("v2.0.0")).toBeLessThan(opts.indexOf("v1.0.0"));
+  });
+});
+
+describe("Comfy Registry helpers", () => {
+  it("formats download counts compactly", () => {
+    expect(formatDownloads(0)).toBe("0");
+    expect(formatDownloads(42)).toBe("42");
+    expect(formatDownloads(1500)).toBe("1.5k");
+    expect(formatDownloads(2_500_000)).toBe("2.5M");
+    expect(formatDownloads(null)).toBe("0");
+  });
+
+  it("maps a version-entry kind to a source tag", () => {
+    expect(iconForKind("git")).toBe("git");
+    expect(iconForKind("registry")).toBe("registry");
+  });
+
+  it("normalizes a sparse registry node with defaults", () => {
+    const n = normalizeRegistryNode({ id: "comfyui-foo" });
+    expect(n).toEqual({
+      id: "comfyui-foo",
+      name: "comfyui-foo",
+      description: "",
+      author: "",
+      downloads: 0,
+      icon: "",
+      repository: "",
+      latest_version: null,
+      publisher: null,
+    });
+  });
+
+  it("builds a registry-row meta line", () => {
+    expect(
+      formatRegistryMeta({
+        id: "x",
+        name: "X",
+        description: "",
+        author: "octocat",
+        downloads: 1500,
+        icon: "",
+        repository: "",
+        latest_version: "1.2.0",
+        publisher: "octocat",
+      }),
+    ).toBe("octocat · 1.5k downloads · v1.2.0");
+  });
+
+  it("merges git refs and registry versions into one tagged list", () => {
+    const entries = mergeVersionEntries({ branches: ["main"], tags: ["v2.0.0"] }, [
+      { version: "1.0.0", deprecated: false },
+      { version: "0.9.0", deprecated: true },
+    ]);
+    // Git entries first (branches then tags), then registry versions.
+    expect(entries.map((e) => [e.kind, e.label])).toEqual([
+      ["git", "main"],
+      ["git", "v2.0.0"],
+      ["registry", "1.0.0"],
+      ["registry", "0.9.0"],
+    ]);
+    expect(entries[0].ref).toBe("main");
+    expect(entries[2].version).toBe("1.0.0");
+    expect(entries[3].meta).toBe("deprecated");
+  });
+
+  it("handles a registry-only merge (no git info)", () => {
+    const entries = mergeVersionEntries(null, [{ version: "1.0.0", deprecated: false }]);
+    expect(entries).toEqual([
+      { kind: "registry", label: "1.0.0", version: "1.0.0", meta: undefined },
+    ]);
   });
 });
 

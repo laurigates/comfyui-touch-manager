@@ -38,14 +38,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
+import zipfile
 from json import JSONDecodeError, loads
 from typing import Any
+from urllib.parse import urlencode, urlparse
 
 import folder_paths
 from aiohttp import web
@@ -72,6 +77,24 @@ _DISABLED_SUFFIX = ".disabled"
 # Cap the per-update commit log so the response stays bounded on a pack that
 # fast-forwards over a large history.
 _UPDATE_LOG_CAP = 20
+
+# Comfy Registry (https://registry.comfy.org). Search + install metadata come
+# from its public REST API; the actual node archive is a zip hosted off-forge.
+REGISTRY_API = "https://api.comfy.org"
+REGISTRY_PAGE_SIZE = 24
+
+# Hosts a registry archive (downloadUrl) may come from. Tight + https-only: the
+# API itself and the GCS bucket it stores published archives in. Anything else
+# is refused and logged so the operator can extend this deliberately.
+ARCHIVE_ALLOWED_HOSTS = {
+    "api.comfy.org",
+    "storage.googleapis.com",
+    "storage.cloud.google.com",
+}
+
+# Hard ceiling on a downloaded archive, so a hostile/garbage URL cannot exhaust
+# disk. 250 MB comfortably covers real node packs.
+MAX_ARCHIVE_BYTES = 250 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +344,44 @@ def _safe_ref(ref: Any) -> str | None:
     return ref
 
 
+def _safe_version(version: Any) -> str | None:
+    """Return a registry version string safe to put in an API path, else None.
+
+    Rejects non-strings, the empty string, leading "-", path separators and
+    "..", and anything outside the semver-ish alphabet.
+    """
+    if not isinstance(version, str) or not version or version.startswith("-"):
+        return None
+    if "/" in version or "\\" in version or ".." in version:
+        return None
+    if not re.match(r"^[A-Za-z0-9._+-]+$", version):
+        return None
+    return version
+
+
+def _validate_archive_url(url: Any) -> bool:
+    """True only for an https URL whose host is in ARCHIVE_ALLOWED_HOSTS."""
+    if not isinstance(url, str):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return False
+    host = (parsed.hostname or "").lower()
+    if host not in ARCHIVE_ALLOWED_HOSTS:
+        log.debug("rejected archive host %r (not in allowlist)", host)
+        return False
+    return True
+
+
+def _coerce_page(raw: Any) -> int:
+    """Parse a 1-based page number, clamping junk/<1 to 1."""
+    try:
+        n = int(str(raw))
+    except (ValueError, TypeError):
+        return 1
+    return n if n >= 1 else 1
+
+
 # ---------------------------------------------------------------------------
 # folder_paths helpers
 # ---------------------------------------------------------------------------
@@ -412,6 +473,128 @@ def _github_releases(remote: str | None) -> list[dict[str, Any]]:
             }
         )
     return releases
+
+
+# ---------------------------------------------------------------------------
+# Comfy Registry (best-effort GET; None on any failure)
+# ---------------------------------------------------------------------------
+
+
+def _registry_get(path: str, params: dict[str, Any] | None = None) -> Any | None:
+    """GET a Comfy Registry endpoint and decode JSON; None on any failure."""
+    url = REGISTRY_API + path
+    if params:
+        clean = {k: v for k, v in params.items() if v not in (None, "")}
+        if clean:
+            url += "?" + urlencode(clean)
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "comfyui-touch-manager"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        log.debug("registry GET failed for %s: %s", url, exc)
+        return None
+
+
+def _normalize_registry_node(raw: dict[str, Any]) -> dict[str, Any]:
+    """Trim a registry node object down to the fields the UI renders."""
+    pub = raw.get("publisher")
+    if isinstance(pub, dict):
+        publisher = pub.get("name") or pub.get("id")
+    elif isinstance(pub, str):
+        publisher = pub
+    else:
+        publisher = None
+    latest = raw.get("latest_version")
+    version = latest.get("version") if isinstance(latest, dict) else None
+    return {
+        "id": raw.get("id"),
+        "name": raw.get("name") or raw.get("id"),
+        "description": raw.get("description") or "",
+        "author": raw.get("author") or publisher or "",
+        "downloads": raw.get("downloads") or 0,
+        "icon": raw.get("icon") or "",
+        "repository": raw.get("repository") or "",
+        "latest_version": version,
+        "publisher": publisher,
+    }
+
+
+def _fetch_bytes(url: str, cap: int) -> bytes:
+    """Download up to ``cap`` bytes from ``url``; raise if it exceeds the cap.
+
+    Isolated so tests can monkeypatch it to return local archive bytes without
+    any network. Reads cap+1 so an over-cap body is detected, not truncated.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "comfyui-touch-manager"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("archive exceeds size cap")
+    return data
+
+
+def _zip_members_safe(zf: zipfile.ZipFile) -> bool:
+    """True only when every member extracts inside the target (no zip-slip)."""
+    for name in zf.namelist():
+        if name.startswith(("/", "\\")) or os.path.isabs(name):
+            return False
+        norm = os.path.normpath(name)
+        if norm == ".." or norm.startswith(".." + os.sep):
+            return False
+    return True
+
+
+def _do_registry_install(
+    download_url: str, name: str, root: str
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Download + safely extract a registry archive into ``root/<name>``.
+
+    Returns (result, "", "") on success or (None, error, code) on failure.
+    Extraction is staged in a temp dir inside ``root`` (so the final move is an
+    atomic same-filesystem rename) and guarded against zip-slip. A single
+    wrapper directory (GitHub-style archives) is unwrapped. Nothing is left in
+    custom_nodes on any failure.
+    """
+    target = os.path.join(root, name)
+    if not _within_root(target, root):
+        return None, "invalid target", "invalid_id"
+    if os.path.exists(target) or os.path.exists(target + _DISABLED_SUFFIX):
+        return None, f"{name} already installed", "exists"
+
+    try:
+        data = _fetch_bytes(download_url, MAX_ARCHIVE_BYTES)
+    except Exception as exc:
+        return None, str(exc) or "download failed", "download_failed"
+
+    # Dot-prefixed so a half-extracted stage is skipped by the installed listing.
+    stage: str | None = tempfile.mkdtemp(prefix=".tm-reg-", dir=root)
+    try:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                if not _zip_members_safe(zf):
+                    return None, "unsafe archive member", "extract_failed"
+                zf.extractall(stage)
+        except zipfile.BadZipFile:
+            return None, "bad zip archive", "extract_failed"
+
+        entries = os.listdir(stage)
+        if len(entries) == 1 and os.path.isdir(os.path.join(stage, entries[0])):
+            pack_root = os.path.join(stage, entries[0])  # unwrap single dir
+        else:
+            pack_root = stage
+        deps_changed = os.path.isfile(os.path.join(pack_root, "requirements.txt"))
+
+        os.rename(pack_root, target)
+        if pack_root == stage:
+            stage = None  # the stage dir itself became the target
+        return {"deps_changed": deps_changed}, "", ""
+    finally:
+        if stage and os.path.isdir(stage):
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -727,6 +910,104 @@ async def versions(request: web.Request) -> web.Response:
             "branches": branches,
             "tags": tags,
             "releases": releases,
+        }
+    )
+
+
+@PromptServer.instance.routes.get("/touch_manager/registry/search")
+async def registry_search(request: web.Request) -> web.Response:
+    """Search the Comfy Registry (server-side proxy; normalised subset)."""
+    q = request.rel_url.query.get("q", "").strip()
+    page = _coerce_page(request.rel_url.query.get("page", "1"))
+    data = await _run(
+        _registry_get, "/nodes", {"page": page, "limit": REGISTRY_PAGE_SIZE, "search": q}
+    )
+    if not isinstance(data, dict):
+        return _err("registry unavailable", "registry_unavailable", 502)
+    nodes = [_normalize_registry_node(n) for n in data.get("nodes", []) if isinstance(n, dict)]
+    return web.json_response(
+        {
+            "ok": True,
+            "page": data.get("page", page),
+            "total_pages": data.get("totalPages", 1),
+            "nodes": nodes,
+        }
+    )
+
+
+@PromptServer.instance.routes.get("/touch_manager/registry/versions")
+async def registry_versions(request: web.Request) -> web.Response:
+    """List the published versions of one registry node."""
+    node_id = _sanitize_name(request.rel_url.query.get("id", ""))
+    if not node_id:
+        return _err("missing or invalid id", "invalid_id", 400)
+    data = await _run(_registry_get, f"/nodes/{node_id}/versions")
+    if data is None:
+        return _err("registry unavailable", "registry_unavailable", 502)
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("versions", [])
+    else:
+        items = []
+    versions = [
+        {
+            "version": v.get("version"),
+            "deprecated": bool(v.get("deprecated")),
+            "createdAt": v.get("createdAt"),
+        }
+        for v in items
+        if isinstance(v, dict) and v.get("version")
+    ]
+    return web.json_response({"ok": True, "id": node_id, "versions": versions})
+
+
+@PromptServer.instance.routes.post("/touch_manager/registry/install")
+async def registry_install(request: web.Request) -> web.Response:
+    """Download + safely extract a registry node version into custom_nodes."""
+    body = await _body(request)
+    # Same bind gate as git install — this fetches and writes node code too.
+    if not _is_loopback(_get_listen()) and not _remote_install_allowed():
+        return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
+
+    node_id = _sanitize_name(str(body.get("id", "")))
+    if not node_id:
+        return _err("missing or invalid id", "invalid_id", 400)
+
+    raw_version = body.get("version")
+    version = _safe_version(raw_version) if raw_version else None
+    if raw_version and version is None:
+        return _err("invalid version", "invalid_version", 400)
+
+    name = _sanitize_name(str(body.get("name") or node_id))
+    if not name:
+        return _err("invalid name", "invalid_id", 400)
+
+    roots = _custom_nodes_roots()
+    if not roots:
+        return _err("no custom_nodes root available", "install_failed", 500)
+    root = roots[0]
+
+    info = await _run(
+        _registry_get, f"/nodes/{node_id}/install", {"version": version} if version else None
+    )
+    if not isinstance(info, dict):
+        return _err("registry unavailable", "registry_unavailable", 502)
+    download_url = info.get("downloadUrl")
+    if not _validate_archive_url(download_url):
+        return _err("registry returned an unsupported download url", "invalid_archive_url", 502)
+
+    result, err, code = await _run(_do_registry_install, download_url, name, root)
+    if result is None:
+        return _err(err, code, 409 if code == "exists" else 500)
+    return web.json_response(
+        {
+            "ok": True,
+            "name": name,
+            "version": version or info.get("version"),
+            "source": "registry",
+            "deps_changed": result["deps_changed"],
+            "restart_required": True,
         }
     )
 

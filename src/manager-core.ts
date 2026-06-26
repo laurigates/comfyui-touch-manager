@@ -111,6 +111,119 @@ export interface VersionsInfo {
   releases: ReleaseInfo[];
 }
 
+// ============================================================
+// Comfy Registry shapes + helpers
+// ============================================================
+
+/** One node in GET /touch_manager/registry/search. */
+export interface RegistryNode {
+  id: string;
+  name: string;
+  description: string;
+  author: string;
+  downloads: number;
+  icon: string;
+  repository: string;
+  latest_version: string | null;
+  publisher: string | null;
+}
+
+/** GET /touch_manager/registry/search. */
+export interface RegistrySearchResult {
+  page: number;
+  total_pages: number;
+  nodes: RegistryNode[];
+}
+
+/** One version in GET /touch_manager/registry/versions. */
+export interface RegistryVersion {
+  version: string;
+  deprecated: boolean;
+  createdAt?: string | null;
+}
+
+/** POST /touch_manager/registry/install. */
+export interface RegistryInstallResult {
+  name: string;
+  version: string | null;
+  source: "registry";
+  deps_changed: boolean;
+}
+
+/** A unified version-picker entry — either a git ref or a registry version. */
+export interface VersionEntry {
+  kind: "git" | "registry";
+  label: string;
+  /** git ref to check out (kind "git"). */
+  ref?: string;
+  /** registry version to install (kind "registry"). */
+  version?: string;
+  /** optional secondary line (e.g. "deprecated"). */
+  meta?: string;
+}
+
+/**
+ * Build one ordered list mixing git refs and registry versions for the version
+ * picker. Git refs (branches then tags, deduped via versionOptions) come first,
+ * then registry versions — each tagged with `kind` so the UI can show a
+ * distinguishing icon. Either source may be empty.
+ */
+export function mergeVersionEntries(
+  gitInfo: Pick<VersionsInfo, "branches" | "tags"> | null,
+  registryVersions: readonly RegistryVersion[],
+): VersionEntry[] {
+  const out: VersionEntry[] = [];
+  if (gitInfo) {
+    for (const ref of versionOptions(gitInfo)) out.push({ kind: "git", label: ref, ref });
+  }
+  for (const v of registryVersions) {
+    out.push({
+      kind: "registry",
+      label: v.version,
+      version: v.version,
+      meta: v.deprecated ? "deprecated" : undefined,
+    });
+  }
+  return out;
+}
+
+/** Short source tag for a version entry, shown as a badge next to it. */
+export function iconForKind(kind: VersionEntry["kind"]): string {
+  return kind === "git" ? "git" : "registry";
+}
+
+/** Compact download count, e.g. 1234 -> "1.2k", 2_500_000 -> "2.5M". */
+export function formatDownloads(n: number | null | undefined): string {
+  const v = typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(v);
+}
+
+/** Defensive normaliser for a registry node (the backend already trims). */
+export function normalizeRegistryNode(raw: Partial<RegistryNode> & { id: string }): RegistryNode {
+  return {
+    id: raw.id,
+    name: raw.name || raw.id,
+    description: raw.description ?? "",
+    author: raw.author ?? "",
+    downloads: typeof raw.downloads === "number" ? raw.downloads : 0,
+    icon: raw.icon ?? "",
+    repository: raw.repository ?? "",
+    latest_version: raw.latest_version ?? null,
+    publisher: raw.publisher ?? null,
+  };
+}
+
+/** One-line meta for a registry search row: author · downloads · version. */
+export function formatRegistryMeta(node: RegistryNode): string {
+  const parts: string[] = [];
+  if (node.author) parts.push(node.author);
+  parts.push(`${formatDownloads(node.downloads)} downloads`);
+  if (node.latest_version) parts.push(`v${node.latest_version}`);
+  return parts.join(" · ");
+}
+
 /** GET /touch_manager/config. */
 export interface ManagerConfig {
   allow_remote_install: boolean;

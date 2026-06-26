@@ -5,10 +5,12 @@
 // tabbed modal built on @laurigates/comfy-modal-kit's `openModalShell`.
 //
 // Tabs: Installed (fuzzy list + per-pack Update/Versions/Uninstall),
-// Updates (check + list packs with updates), Install (paste a github/gitlab
-// URL — gated by the backend bind policy), Core (core repo ref + behind +
-// update). After any mutating action the modal shows a prominent
-// "Restart ComfyUI to apply" notice — it NEVER auto-restarts.
+// Updates (progressive per-pack check with live progress), Install (paste a
+// github/gitlab URL — gated by the backend bind policy), Registry (search +
+// install from registry.comfy.org, git or registry version), Core (core repo
+// ref + behind + update). After any mutating action the modal shows a prominent
+// "Restart ComfyUI to apply" notice with an optional one-tap restart (the
+// backend reboot gate decides whether it is offered).
 //
 // All DOM lives here; the pure helpers (URL validation mirror, version-label
 // formatting, fuzzy glue) come from manager-core.ts.
@@ -26,17 +28,25 @@ import {
   formatDepsWarning,
   formatProgress,
   formatRef,
+  formatRegistryMeta,
   formatUpdateStatus,
   formatUpdateSummary,
   type InstalledPack,
+  iconForKind,
   installPermitted,
   type ManagerConfig,
+  mergeVersionEntries,
   partitionUpdateResults,
+  type RegistryInstallResult,
+  type RegistryNode,
+  type RegistrySearchResult,
+  type RegistryVersion,
   rebootPermitted,
   type UpdateCheckResult,
   type UpdateResult,
   type UpdatesListEntry,
   urlValidationHint,
+  type VersionEntry,
   type VersionsInfo,
   validateInstallUrl,
   versionOptions,
@@ -165,6 +175,12 @@ function ensureStyle(): void {
 .tm-empty { opacity: 0.7; font-size: 14px; padding: 16px 4px; text-align: center; }
 .tm-field-label { font-size: 13px; opacity: 0.8; margin-bottom: 4px; }
 .tm-section { display: flex; flex-direction: column; gap: 10px; }
+.tm-badge { display: inline-block; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 2px 7px; border-radius: 6px; margin-right: 8px;
+  border: 1px solid var(--border-color, #444); opacity: 0.85; }
+.tm-badge-git { background: rgba(40,90,160,0.25); }
+.tm-badge-registry { background: rgba(120,60,160,0.25); }
+.tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
 .cmp-match { text-decoration: underline; }
 `;
   document.head.appendChild(s);
@@ -212,7 +228,7 @@ function restartBanner(state: ManagerState): HTMLElement {
 // Manager modal
 // ============================================================
 
-type TabId = "installed" | "updates" | "install" | "core";
+type TabId = "installed" | "updates" | "install" | "registry" | "core";
 
 interface ManagerState {
   shell: ModalShellController;
@@ -254,6 +270,7 @@ export function openManager(): void {
     { id: "installed", label: "Installed" },
     { id: "updates", label: "Updates" },
     { id: "install", label: "Install URL" },
+    { id: "registry", label: "Registry" },
     { id: "core", label: "Core" },
   ];
   const tabButtons = new Map<TabId, HTMLButtonElement>();
@@ -308,6 +325,8 @@ async function renderActiveTab(state: ManagerState, id: TabId): Promise<void> {
       return renderUpdatesTab(state);
     case "install":
       return renderInstallTab(state);
+    case "registry":
+      return renderRegistryTab(state);
     case "core":
       return renderCoreTab(state);
   }
@@ -775,6 +794,214 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
     const err = e as ManagerError;
     toast("error", "Install failed", `${err.message}${err.code ? ` (${err.code})` : ""}`);
   } finally {
+    state.shell.setBusy(false);
+  }
+}
+
+// ============================================================
+// Registry tab (search + install from registry.comfy.org)
+// ============================================================
+
+async function renderRegistryTab(state: ManagerState): Promise<void> {
+  const section = resetBody(state);
+  section.appendChild(
+    el(
+      "div",
+      "tm-note tm-note-info",
+      "Search the Comfy Registry and install a node. Python dependencies are " +
+        "NOT installed automatically — install them and restart afterwards.",
+    ),
+  );
+
+  section.appendChild(el("div", "tm-field-label", "Search the registry"));
+  const input = el("input", "tm-input");
+  input.type = "search";
+  input.placeholder = "e.g. controlnet, upscale, ipadapter…";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  section.appendChild(input);
+
+  const results = el("div", "tm-section");
+  section.appendChild(results);
+
+  const run = (page: number): void => void searchRegistry(state, input.value, page, results);
+  input.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter") run(1);
+  });
+  section.appendChild(button("Search", "tm-btn-primary", () => run(1)));
+}
+
+async function searchRegistry(
+  state: ManagerState,
+  query: string,
+  page: number,
+  results: HTMLElement,
+): Promise<void> {
+  results.replaceChildren(emptyState("Searching the registry…"));
+  state.shell.setBusy(true);
+  let data: RegistrySearchResult;
+  try {
+    data = await apiGet<RegistrySearchResult>(
+      `registry/search?q=${encodeURIComponent(query)}&page=${page}`,
+    );
+  } catch (e) {
+    results.replaceChildren(emptyState(`Registry search failed: ${(e as Error).message}`));
+    return;
+  } finally {
+    state.shell.setBusy(false);
+  }
+
+  results.replaceChildren();
+  const nodes = data.nodes ?? [];
+  if (nodes.length === 0) {
+    results.appendChild(emptyState("No matching nodes."));
+    return;
+  }
+
+  const list = el("div", "tm-list");
+  for (const node of nodes) list.appendChild(registryRow(state, node));
+  results.appendChild(list);
+
+  // Pager: prev / page indicator / next.
+  const totalPages = data.total_pages ?? 1;
+  if (totalPages > 1) {
+    const pager = el("div", "tm-row-actions");
+    const prev = button("← Prev", "", () => void searchRegistry(state, query, page - 1, results));
+    prev.disabled = page <= 1;
+    const next = button("Next →", "", () => void searchRegistry(state, query, page + 1, results));
+    next.disabled = page >= totalPages;
+    pager.appendChild(prev);
+    pager.appendChild(el("div", "tm-row-meta", `Page ${page} / ${totalPages}`));
+    pager.appendChild(next);
+    results.appendChild(pager);
+  }
+}
+
+function registryRow(state: ManagerState, node: RegistryNode): HTMLElement {
+  const row = el("div", "tm-row");
+  row.appendChild(el("div", "tm-row-title", node.name));
+  row.appendChild(el("div", "tm-row-meta", formatRegistryMeta(node)));
+  if (node.description) row.appendChild(el("div", "tm-row-meta", node.description));
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(
+    button("Versions", "tm-btn-primary", () => void openRegistryVersions(state, node)),
+  );
+  row.appendChild(actions);
+  return row;
+}
+
+/**
+ * Unified version picker for a registry node: lists the node's registry
+ * versions AND (when it has a public repo) a git option, each tagged with a
+ * source badge. Picking a registry version downloads that archive; picking the
+ * git option clones the repository through the existing install flow.
+ */
+async function openRegistryVersions(state: ManagerState, node: RegistryNode): Promise<void> {
+  const section = resetBody(state);
+  const back = button("← Back to registry", "", () => void renderRegistryTab(state));
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${node.name}`));
+  section.appendChild(emptyState("Loading versions…"));
+  state.shell.setBusy(true);
+
+  let versions: RegistryVersion[];
+  try {
+    const data = await apiGet<{ versions: RegistryVersion[] }>(
+      `registry/versions?id=${encodeURIComponent(node.id)}`,
+    );
+    versions = data.versions ?? [];
+  } catch (e) {
+    section.replaceChildren(
+      back,
+      el("div", "tm-row-title", `Versions — ${node.name}`),
+      emptyState(`Failed: ${(e as Error).message}`),
+    );
+    state.shell.setBusy(false);
+    return;
+  }
+  state.shell.setBusy(false);
+
+  section.replaceChildren();
+  section.appendChild(back);
+  section.appendChild(el("div", "tm-row-title", `Versions — ${node.name}`));
+
+  const entries: VersionEntry[] = mergeVersionEntries(null, versions);
+  // Offer the repo's default branch as a git option when it is an allowlisted
+  // git URL — this is the "git vs registry" choice the picker distinguishes.
+  const repoOk = node.repository ? validateInstallUrl(node.repository).ok : false;
+  if (repoOk) {
+    entries.unshift({ kind: "git", label: `${node.repository} (default branch)` });
+  }
+
+  if (entries.length === 0) {
+    section.appendChild(emptyState("No installable versions found."));
+    return;
+  }
+
+  const list = el("div", "tm-list");
+  for (const entry of entries) list.appendChild(registryVersionRow(state, node, entry));
+  section.appendChild(list);
+}
+
+function registryVersionRow(
+  state: ManagerState,
+  node: RegistryNode,
+  entry: VersionEntry,
+): HTMLElement {
+  const r = el("div", "tm-row");
+  const head = el("div", "tm-row-head");
+  const badge = el("span", `tm-badge tm-badge-${entry.kind}`, iconForKind(entry.kind));
+  head.appendChild(badge);
+  head.appendChild(el("span", "tm-row-title", entry.label));
+  r.appendChild(head);
+  if (entry.meta) r.appendChild(el("div", "tm-row-meta", entry.meta));
+
+  const actions = el("div", "tm-row-actions");
+  if (entry.kind === "git") {
+    actions.appendChild(
+      button("Install (git)", "tm-btn-primary", () => void doInstall(state, node.repository, "")),
+    );
+  } else {
+    actions.appendChild(
+      button(
+        "Install",
+        "tm-btn-primary",
+        () => void doRegistryInstall(state, node, entry.version ?? null),
+      ),
+    );
+  }
+  r.appendChild(actions);
+  return r;
+}
+
+async function doRegistryInstall(
+  state: ManagerState,
+  node: RegistryNode,
+  version: string | null,
+): Promise<void> {
+  const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
+  const ok = await confirmAction(
+    "Install from registry?",
+    `Download and install ${label} from the Comfy Registry into custom_nodes? ` +
+      "Only install code you trust. A restart is required.",
+  );
+  if (!ok) return;
+
+  state.shell.setBusy(true);
+  try {
+    const body: Record<string, unknown> = { id: node.id, name: node.id };
+    if (version) body.version = version;
+    const res = await apiPost<RegistryInstallResult>("registry/install", body);
+    markRestartPending(state);
+    const detail = res.deps_changed
+      ? "Python dependencies changed — install them, then restart."
+      : "Restart ComfyUI to apply.";
+    toast("success", `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, detail);
+    state.shell.setBusy(false);
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e as ManagerError;
+    toast("error", "Registry install failed", `${err.message}${err.code ? ` (${err.code})` : ""}`);
     state.shell.setBusy(false);
   }
 }

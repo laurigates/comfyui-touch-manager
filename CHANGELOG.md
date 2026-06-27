@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.3...comfyui-touch-manager-v0.1.4) (2026-06-27)
+
+
+### Features
+
+* **updates:** in-modal confirms, cached checks, filtering, scroll restore ([#14](https://github.com/laurigates/comfyui-touch-manager/issues/14)) ([5c090fc](https://github.com/laurigates/comfyui-touch-manager/commit/5c090fce3eb427fb7ede4e3b18f65c17db36d145))
+
 ## [0.1.3](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.2...comfyui-touch-manager-v0.1.3) (2026-06-26)
 
 

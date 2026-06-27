@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.4...comfyui-touch-manager-v0.1.5) (2026-06-27)
+
+
+### Features
+
+* **notify:** one-tap copy-to-clipboard on error/warning popups ([#16](https://github.com/laurigates/comfyui-touch-manager/issues/16)) ([243ff2c](https://github.com/laurigates/comfyui-touch-manager/commit/243ff2c98c551a023cf27594476bebdca4d7b295))
+
 ## [0.1.4](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.3...comfyui-touch-manager-v0.1.4) (2026-06-27)
 
 

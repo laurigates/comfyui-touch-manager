@@ -17,6 +17,7 @@
 import {
   highlightMatches,
   type ModalShellController,
+  notify,
   openModalShell,
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
@@ -105,14 +106,14 @@ function toast(
   severity: "success" | "info" | "warn" | "error",
   summary: string,
   detail?: string,
-  life = 4000,
+  life?: number,
 ): void {
   try {
-    if (hasExtMgr()) {
-      app.extensionManager.toast.add({ severity, summary, detail, life });
-    } else {
-      console.info(`[${EXT_NAME}] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
-    }
+    // notify() (from the modal kit) renders its own DOM toast so error/warn
+    // notifications carry a one-tap Copy button — the message can be lifted
+    // into the clipboard for a bug report instead of retyped. Omitting `life`
+    // lets notify() pick the per-severity default (errors stay sticky).
+    notify({ severity, summary, detail, ...(life !== undefined ? { life } : {}) });
   } catch (e) {
     console.warn(`[${EXT_NAME}] toast failed`, e);
   }

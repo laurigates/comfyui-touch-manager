@@ -676,18 +676,46 @@ function toast(severity, summary, detail, life = 4000) {
     console.warn(`[${EXT_NAME}] toast failed`, e);
   }
 }
-async function confirmAction(title, message) {
-  try {
-    if (hasExtMgr()) {
-      const ok = await app.extensionManager.dialog.confirm({ title, message });
-      return ok === true;
-    }
-  } catch (e) {
-    console.warn(`[${EXT_NAME}] confirm failed`, e);
-  }
-  return typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(`${title}
-
-${message}`) : false;
+function confirmAction(state, title, message, opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = el("div", "tm-confirm-overlay");
+    const box = el("div", "tm-confirm-box");
+    box.appendChild(el("div", "tm-confirm-title", title));
+    box.appendChild(el("div", "tm-confirm-msg", message));
+    const actions = el("div", "tm-confirm-actions");
+    let settled = false;
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      window.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(true);
+      }
+    };
+    const cancel = button("Cancel", "tm-confirm-cancel", () => finish(false));
+    const ok = button(opts.confirmLabel ?? "Confirm", `tm-confirm-ok ${opts.danger ? "tm-btn-danger" : "tm-btn-primary"}`, () => finish(true));
+    actions.append(cancel, ok);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay)
+        finish(false);
+    });
+    state.shell.dialog.appendChild(overlay);
+    window.addEventListener("keydown", onKey, true);
+    requestAnimationFrame(() => ok.focus());
+  });
 }
 var STYLE_ID2 = "touch-manager-style";
 function ensureStyle2() {
@@ -730,6 +758,20 @@ function ensureStyle2() {
 .tm-badge-git { background: rgba(40,90,160,0.25); }
 .tm-badge-registry { background: rgba(120,60,160,0.25); }
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
+.tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tm-updates-head .tm-row-meta { margin-left: auto; }
+/* In-modal confirmation. The shell sits at z-index 9999; ComfyUI's own
+   PrimeVue confirm dialog renders BELOW it (≈1100) and is invisible behind
+   our backdrop — so we draw our own overlay inside the dialog instead. */
+.tm-confirm-overlay { position: absolute; inset: 0; z-index: 5; display: flex;
+  align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
+.tm-confirm-box { width: min(460px, 100%); display: flex; flex-direction: column; gap: 12px;
+  padding: 18px; border-radius: 12px; background: var(--comfy-menu-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444); box-shadow: 0 16px 48px rgba(0,0,0,0.7); }
+.tm-confirm-title { font-size: 17px; font-weight: 700; }
+.tm-confirm-msg { font-size: 14px; line-height: 1.45; opacity: 0.9; word-break: break-word; }
+.tm-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .cmp-match { text-decoration: underline; }
 `;
   document.head.appendChild(s);
@@ -781,7 +823,10 @@ function openManager() {
     config: null,
     installed: [],
     activeTab: "installed",
-    restartPending: false
+    restartPending: false,
+    updates: null,
+    search: { installed: "", updates: "" },
+    updatesScroll: 0
   };
   const tabBar = el("div", "tm-tabs");
   const tabs = [
@@ -800,22 +845,24 @@ function openManager() {
     tabBar.appendChild(b);
   }
   shell.toolbarEl.appendChild(tabBar);
-  function setSearchVisible(visible) {
-    const row = shell.searchEl.parentElement;
-    if (row)
-      row.style.display = visible ? "" : "none";
-  }
   function selectTab(id) {
+    if (state.activeTab === "updates")
+      state.updatesScroll = shell.bodyEl.scrollTop;
     state.activeTab = id;
     for (const [tid, b] of tabButtons)
       b.classList.toggle("tm-active", tid === id);
-    setSearchVisible(id === "installed");
+    syncSearch(state);
     shell.setStatus("");
     renderActiveTab(state, id);
   }
   shell.searchEl.addEventListener("input", () => {
-    if (state.activeTab === "installed")
+    if (state.activeTab === "installed") {
+      state.search.installed = shell.searchEl.value;
       renderInstalledList(state);
+    } else if (state.activeTab === "updates") {
+      state.search.updates = shell.searchEl.value;
+      repaintUpdatesList(state);
+    }
   });
   (async () => {
     try {
@@ -849,6 +896,20 @@ function resetBody(state) {
   const section = el("div", "tm-section");
   body.appendChild(section);
   return section;
+}
+function syncSearch(state) {
+  const onInstalled = state.activeTab === "installed";
+  const onUpdates = state.activeTab === "updates" && state.updates != null;
+  const row = state.shell.searchEl.parentElement;
+  if (row)
+    row.style.display = onInstalled || onUpdates ? "" : "none";
+  if (onInstalled) {
+    state.shell.searchEl.placeholder = "Filter installed packs…";
+    state.shell.searchEl.value = state.search.installed;
+  } else if (onUpdates) {
+    state.shell.searchEl.placeholder = "Filter updates…";
+    state.shell.searchEl.value = state.search.updates;
+  }
 }
 function markRestartPending(state) {
   state.restartPending = true;
@@ -921,23 +982,37 @@ function installedRow(state, pack, matches) {
   row.appendChild(actions);
   return row;
 }
-async function doUpdate(state, name, ref) {
+function removeFromUpdatesCache(state, name) {
+  if (!state.updates)
+    return;
+  state.updates.results = state.updates.results.filter((r) => r.name !== name);
+}
+function updateResultBack(state, origin) {
+  if (origin === "updates") {
+    return button("← Back to updates", "", () => void renderUpdatesTab(state));
+  }
+  return button("← Back to installed", "", () => void renderInstalledTab(state));
+}
+async function doUpdate(state, name, opts = {}) {
+  if (opts.origin === "updates")
+    state.updatesScroll = state.shell.bodyEl.scrollTop;
   state.shell.setBusy(true);
   try {
-    const result = await apiPost("update", ref ? { name, ref } : { name });
+    const result = await apiPost("update", opts.ref ? { name, ref: opts.ref } : { name });
     markRestartPending(state);
+    removeFromUpdatesCache(state, name);
     toast("success", `Updated ${name}`, formatUpdateSummary(result));
     state.shell.setBusy(false);
-    renderUpdateResult(state, { ...result, name });
+    renderUpdateResult(state, { ...result, name }, updateResultBack(state, opts.origin));
   } catch (e) {
     const err = e;
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
     state.shell.setBusy(false);
   }
 }
-function renderUpdateResult(state, result) {
+function renderUpdateResult(state, result, back) {
   const section = resetBody(state);
-  section.appendChild(button("← Back to installed", "", () => void renderInstalledTab(state)));
+  section.appendChild(back);
   section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
   section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
   const depsWarning = formatDepsWarning(result);
@@ -955,13 +1030,14 @@ function renderUpdateResult(state, result) {
   }
 }
 async function doUninstall(state, name) {
-  const ok = await confirmAction("Disable pack?", `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`);
+  const ok = await confirmAction(state, "Disable pack?", `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`, { confirmLabel: "Disable", danger: true });
   if (!ok)
     return;
   state.shell.setBusy(true);
   try {
     await apiPost("uninstall", { name });
     markRestartPending(state);
+    state.updates = null;
     toast("success", `Disabled ${name}`, "Restart ComfyUI to apply.");
     await renderInstalledTab(state);
   } catch (e) {
@@ -1002,7 +1078,7 @@ async function openVersions(state, pack) {
       const r = el("div", "tm-row");
       r.appendChild(el("div", "tm-row-title", ref));
       const actions = el("div", "tm-row-actions");
-      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, ref)));
+      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, { ref })));
       r.appendChild(actions);
       list.appendChild(r);
     }
@@ -1021,53 +1097,129 @@ async function openVersions(state, pack) {
         meta.push(rel.published_at);
       r.appendChild(el("div", "tm-row-meta", meta.join(" · ")));
       const actions = el("div", "tm-row-actions");
-      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, rel.tag)));
+      actions.appendChild(button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, { ref: rel.tag })));
       r.appendChild(actions);
       list.appendChild(r);
     }
     section.appendChild(list);
   }
 }
-async function renderUpdatesTab(state) {
-  const section = resetBody(state);
-  section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
-  section.appendChild(el("div", "tm-note tm-note-info", "Fetches each git pack's remote and compares against the tracked branch."));
+function lastCheckedLabel(cache) {
+  const t = new Date(cache.checkedAt);
+  const hh = String(t.getHours()).padStart(2, "0");
+  const mm = String(t.getMinutes()).padStart(2, "0");
+  return `Last checked ${hh}:${mm}`;
 }
-function updateRow(state, info) {
+async function renderUpdatesTab(state) {
+  if (!state.updates) {
+    const section = resetBody(state);
+    section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+    section.appendChild(el("div", "tm-note tm-note-info", "Fetches each git pack's remote and compares against the tracked branch. " + "Results are cached — update a pack and come back without re-checking everything."));
+    return;
+  }
+  paintUpdatesTab(state);
+  restoreUpdatesScroll(state);
+}
+function restoreUpdatesScroll(state) {
+  const top = state.updatesScroll;
+  if (top <= 0)
+    return;
+  requestAnimationFrame(() => {
+    state.shell.bodyEl.scrollTop = top;
+  });
+}
+function updateRow(state, info, matches = []) {
   const r = el("div", "tm-row");
-  r.appendChild(el("div", "tm-row-title", info.name));
+  const title = el("div", "tm-row-title");
+  title.appendChild(highlightMatches(info.name, matches));
+  r.appendChild(title);
   r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
   for (const c of info.incoming) {
     r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
   }
   const actions = el("div", "tm-row-actions");
-  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name)));
+  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name, { origin: "updates" })));
   r.appendChild(actions);
   return r;
 }
+function paintUpdatesTab(state) {
+  if (!state.updates)
+    return;
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-updates-head"));
+  section.appendChild(el("div", "tm-list tm-updates-list"));
+  section.appendChild(el("div", "tm-section tm-updates-errors"));
+  syncSearch(state);
+  repaintUpdatesList(state);
+}
+function repaintUpdatesList(state) {
+  const cache = state.updates;
+  if (!cache)
+    return;
+  const body = state.shell.bodyEl;
+  const head = body.querySelector(".tm-updates-head");
+  const list = body.querySelector(".tm-updates-list");
+  const errorsWrap = body.querySelector(".tm-updates-errors");
+  if (!head || !list)
+    return;
+  head.replaceChildren();
+  const recheck = button("Re-check", "tm-btn-primary", () => void checkUpdates(state));
+  recheck.disabled = !cache.complete;
+  head.appendChild(recheck);
+  head.appendChild(el("div", "tm-row-meta", cache.complete ? lastCheckedLabel(cache) : "checking…"));
+  const { actionable, errored } = partitionUpdateResults(cache.results);
+  const ranked = filterPacks(state.search.updates, actionable);
+  list.replaceChildren();
+  for (const { pack, primaryMatches } of ranked) {
+    list.appendChild(updateRow(state, pack, primaryMatches));
+  }
+  if (ranked.length === 0) {
+    const message = actionable.length > 0 ? "No matches." : cache.complete ? "Everything is up to date." : "Checking…";
+    list.appendChild(emptyState(message));
+  }
+  if (errorsWrap) {
+    errorsWrap.replaceChildren();
+    if (errored.length > 0) {
+      errorsWrap.appendChild(el("div", "tm-field-label", "Could not check"));
+      for (const e of errored) {
+        errorsWrap.appendChild(el("div", "tm-row-meta", `${e.name}: ${e.error}`));
+      }
+    }
+  }
+  state.shell.setStatus(cache.complete ? `${ranked.length}/${actionable.length}` : formatProgress(cache.results.length, cache.total));
+}
 var UPDATE_CHECK_CONCURRENCY = 3;
 async function checkUpdates(state) {
+  const cache = { results: [], total: 0, checkedAt: Date.now(), complete: false };
+  state.updates = cache;
+  state.updatesScroll = 0;
   const section = resetBody(state);
-  section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+  section.appendChild(emptyState("Listing git-backed packs…"));
+  state.shell.setBusy(true);
   let names;
   try {
     const data = await apiGet("updates/list");
     names = (data.packs ?? []).map((p) => p.name);
   } catch (e) {
-    section.appendChild(emptyState(`Failed: ${e.message}`));
+    state.shell.setBusy(false);
+    if (state.updates !== cache)
+      return;
+    state.updates = null;
+    const s = resetBody(state);
+    s.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+    s.appendChild(emptyState(`Failed: ${e.message}`));
     return;
   }
+  state.shell.setBusy(false);
+  if (state.updates !== cache)
+    return;
+  cache.total = names.length;
   if (names.length === 0) {
-    section.appendChild(emptyState("No git-backed packs to check."));
+    cache.complete = true;
+    paintUpdatesTab(state);
     return;
   }
-  const total = names.length;
-  state.shell.setStatus(formatProgress(0, total));
-  const list = el("div", "tm-list");
-  section.appendChild(list);
-  const errors = el("div", "tm-section");
-  const results = [];
-  let done = 0;
+  paintUpdatesTab(state);
   let cursor = 0;
   const worker = async () => {
     while (cursor < names.length) {
@@ -1087,22 +1239,19 @@ async function checkUpdates(state) {
           incoming: []
         };
       }
-      results.push(info);
-      if (info.update_available && !info.error)
-        list.appendChild(updateRow(state, info));
-      else if (info.error)
-        errors.appendChild(el("div", "tm-row-meta", `${info.name}: ${info.error}`));
-      state.shell.setStatus(formatProgress(++done, total));
+      if (state.updates !== cache)
+        return;
+      cache.results.push(info);
+      if (state.activeTab === "updates")
+        repaintUpdatesList(state);
     }
   };
   await Promise.all(Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()));
-  const { actionable, errored } = partitionUpdateResults(results);
-  if (actionable.length === 0)
-    list.appendChild(emptyState("Everything is up to date."));
-  if (errored.length > 0) {
-    section.appendChild(el("div", "tm-field-label", "Could not check"));
-    section.appendChild(errors);
-  }
+  if (state.updates !== cache)
+    return;
+  cache.complete = true;
+  if (state.activeTab === "updates")
+    repaintUpdatesList(state);
 }
 async function renderInstallTab(state) {
   const section = resetBody(state);
@@ -1169,7 +1318,7 @@ async function doInstall(state, url, ref) {
     toast("warn", "Invalid URL", urlValidationHint(v.reason));
     return;
   }
-  const ok = await confirmAction("Install pack?", `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`);
+  const ok = await confirmAction(state, "Install pack?", `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`, { confirmLabel: "Install" });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1179,6 +1328,7 @@ async function doInstall(state, url, ref) {
       body.ref = ref.trim();
     const res = await apiPost("install", body);
     markRestartPending(state);
+    state.updates = null;
     toast("success", `Installed ${res.name}`, "Restart ComfyUI to apply.");
     await renderInstalledTab(state);
   } catch (e) {
@@ -1307,7 +1457,7 @@ function registryVersionRow(state, node, entry) {
 }
 async function doRegistryInstall(state, node, version) {
   const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
-  const ok = await confirmAction("Install from registry?", `Download and install ${label} from the Comfy Registry into custom_nodes? ` + "Only install code you trust. A restart is required.");
+  const ok = await confirmAction(state, "Install from registry?", `Download and install ${label} from the Comfy Registry into custom_nodes? ` + "Only install code you trust. A restart is required.", { confirmLabel: "Install" });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1317,6 +1467,7 @@ async function doRegistryInstall(state, node, version) {
       body.version = version;
     const res = await apiPost("registry/install", body);
     markRestartPending(state);
+    state.updates = null;
     const detail = res.deps_changed ? "Python dependencies changed — install them, then restart." : "Restart ComfyUI to apply.";
     toast("success", `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, detail);
     state.shell.setBusy(false);
@@ -1365,7 +1516,7 @@ async function renderCoreTab(state) {
   section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo. Does not install Python dependencies or restart — do those yourself after."));
 }
 async function doReboot(state) {
-  const ok = await confirmAction("Restart ComfyUI?", "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.");
+  const ok = await confirmAction(state, "Restart ComfyUI?", "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.", { confirmLabel: "Restart now", danger: true });
   if (!ok)
     return;
   toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
@@ -1382,7 +1533,7 @@ async function doReboot(state) {
   }
 }
 async function doCoreUpdate(state) {
-  const ok = await confirmAction("Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.");
+  const ok = await confirmAction(state, "Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.", { confirmLabel: "Update core" });
   if (!ok)
     return;
   state.shell.setBusy(true);

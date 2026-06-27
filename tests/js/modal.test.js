@@ -84,6 +84,14 @@ describe("openManager (jsdom modal smoke)", () => {
 
     restartBtn?.click();
     await flush();
+
+    // The confirmation is drawn IN-MODAL (not via ComfyUI's PrimeVue dialog,
+    // which renders behind our z-index-9999 shell). Confirm it appears on top
+    // and click its OK button.
+    const overlay = document.querySelector(".tm-confirm-overlay");
+    expect(overlay).toBeTruthy();
+    overlay.querySelector(".tm-confirm-ok").click();
+    await flush();
     await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
@@ -213,8 +221,10 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(document.body.textContent).toContain("git");
     expect(document.body.textContent).toContain("registry");
 
-    // Install the registry version.
+    // Install the registry version — then confirm via the in-modal overlay.
     [...document.querySelectorAll("button")].find((b) => b.textContent === "Install")?.click();
+    await flush();
+    document.querySelector(".tm-confirm-overlay .tm-confirm-ok").click();
     for (let i = 0; i < 4; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/registry/install"))).toBe(true);
@@ -243,5 +253,171 @@ describe("openManager (jsdom modal smoke)", () => {
       (b) => b.textContent === "Restart ComfyUI",
     );
     expect(restartBtn).toBeFalsy();
+  });
+
+  // ----- in-modal confirmation (the restart-behind-modal fix) -----
+
+  it("cancelling the in-modal confirm does NOT restart and removes the overlay", async () => {
+    __responses["/touch_manager/core"] = {
+      ok: true,
+      is_git: true,
+      ref: { type: "branch", name: "master", sha: "abc1234" },
+      behind: { origin: 0, upstream: 0 },
+      dirty: false,
+      remotes: { origin: null, upstream: null },
+    };
+    openManager();
+    await flush();
+    await flush();
+
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Core")?.click();
+    await flush();
+    await flush();
+
+    [...document.querySelectorAll("button")]
+      .find((b) => b.textContent === "Restart ComfyUI")
+      ?.click();
+    await flush();
+
+    const overlay = document.querySelector(".tm-confirm-overlay");
+    expect(overlay).toBeTruthy();
+    // The confirm is mounted inside the shell dialog (z-index 9999), not via the
+    // PrimeVue dialog that would render behind it.
+    expect(document.querySelector(".cmp-dialog")?.contains(overlay)).toBe(true);
+
+    overlay.querySelector(".tm-confirm-cancel").click();
+    await flush();
+
+    expect(document.querySelector(".tm-confirm-overlay")).toBeFalsy();
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(false);
+  });
+
+  // ----- Updates tab: caching, filtering, scroll/back-navigation -----
+
+  // Two distinctly-named packs, both with an available update.
+  const seedTwoUpdates = () => {
+    __responses["/touch_manager/updates/list"] = {
+      ok: true,
+      packs: [{ name: "pack-alpha" }, { name: "pack-beta" }],
+    };
+    __responses["/touch_manager/updates/check?name=pack-alpha"] = {
+      ok: true,
+      name: "pack-alpha",
+      update_available: true,
+      behind: 2,
+      ahead: 0,
+      error: null,
+      incoming: [{ sha: "aaa1111", subject: "alpha change" }],
+    };
+    __responses["/touch_manager/updates/check?name=pack-beta"] = {
+      ok: true,
+      name: "pack-beta",
+      update_available: true,
+      behind: 1,
+      ahead: 0,
+      error: null,
+      incoming: [{ sha: "bbb2222", subject: "beta change" }],
+    };
+  };
+
+  const openUpdatesAndCheck = async () => {
+    openManager();
+    await flush();
+    await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Updates")?.click();
+    await flush();
+    [...document.querySelectorAll("button")]
+      .find((b) => b.textContent === "Check for updates")
+      ?.click();
+    for (let i = 0; i < 8; i++) await flush();
+  };
+
+  it("caches the sweep — leaving and re-entering Updates does not re-check", async () => {
+    seedTwoUpdates();
+    await openUpdatesAndCheck();
+
+    const checksAfterFirst = __fetchCalls.filter((u) =>
+      u.includes("/touch_manager/updates/check"),
+    ).length;
+    expect(checksAfterFirst).toBe(2);
+    expect(document.body.textContent).toContain("pack-alpha");
+
+    // Switch away and back.
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Installed")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Updates")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    // No new per-pack checks — the cached results repaint instead.
+    const checksAfterReturn = __fetchCalls.filter((u) =>
+      u.includes("/touch_manager/updates/check"),
+    ).length;
+    expect(checksAfterReturn).toBe(2);
+    expect(document.body.textContent).toContain("pack-alpha");
+    // A finished sweep offers a Re-check affordance + last-checked label.
+    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "Re-check")).toBe(
+      true,
+    );
+    expect(document.body.textContent).toMatch(/Last checked/);
+  });
+
+  it("filters the cached updates list by pack name", async () => {
+    seedTwoUpdates();
+    await openUpdatesAndCheck();
+    expect(document.body.textContent).toContain("pack-alpha");
+    expect(document.body.textContent).toContain("pack-beta");
+
+    const search = document.querySelector(".cmp-search");
+    search.value = "alpha";
+    search.dispatchEvent(new Event("input"));
+    await flush();
+
+    const list = document.querySelector(".tm-updates-list");
+    expect(list.textContent).toContain("pack-alpha");
+    expect(list.textContent).not.toContain("pack-beta");
+  });
+
+  it("updating from the Updates list drops the pack and returns to the cached list", async () => {
+    seedTwoUpdates();
+    __responses["/touch_manager/update"] = {
+      ok: true,
+      name: "pack-alpha",
+      before_short: "aaa1111",
+      after_short: "ccc3333",
+      commits_applied: 1,
+      commit_log: [{ sha: "ccc3333", subject: "alpha change" }],
+      changed_files: 1,
+      deps_changed: false,
+      truncated: false,
+    };
+    await openUpdatesAndCheck();
+
+    const checksBefore = __fetchCalls.filter((u) =>
+      u.includes("/touch_manager/updates/check"),
+    ).length;
+
+    // Update pack-alpha from its row (the first Update button in the list).
+    const list = document.querySelector(".tm-updates-list");
+    [...list.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
+    // The result panel offers a Back-to-updates affordance, not back-to-installed.
+    const back = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "← Back to updates",
+    );
+    expect(back).toBeTruthy();
+
+    back?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    // Back in the cached list: no fresh sweep, and the updated pack is gone.
+    const checksAfter = __fetchCalls.filter((u) =>
+      u.includes("/touch_manager/updates/check"),
+    ).length;
+    expect(checksAfter).toBe(checksBefore);
+    const list2 = document.querySelector(".tm-updates-list");
+    expect(list2.textContent).not.toContain("pack-alpha");
+    expect(list2.textContent).toContain("pack-beta");
   });
 });

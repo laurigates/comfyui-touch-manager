@@ -118,20 +118,74 @@ function toast(
   }
 }
 
-async function confirmAction(title: string, message: string): Promise<boolean> {
-  try {
-    if (hasExtMgr()) {
-      const ok = await app.extensionManager.dialog.confirm({ title, message });
-      return ok === true;
-    }
-  } catch (e) {
-    console.warn(`[${EXT_NAME}] confirm failed`, e);
-  }
-  // No dialog service: fall back to the browser confirm so destructive actions
-  // still gate.
-  return typeof window !== "undefined" && typeof window.confirm === "function"
-    ? window.confirm(`${title}\n\n${message}`)
-    : false;
+interface ConfirmOptions {
+  confirmLabel?: string;
+  danger?: boolean;
+}
+
+/**
+ * Touch-first confirmation rendered INSIDE the modal shell.
+ *
+ * We deliberately do NOT use ComfyUI's `extensionManager.dialog.confirm`: that
+ * PrimeVue dialog mounts at a z-index (~1100) far below this pack's modal shell
+ * (the kit's backdrop/dialog sit at 9998/9999), so it appears *behind* our
+ * opaque backdrop — invisible and unclickable. That is the "Restart now does
+ * nothing" bug. Drawing the confirmation as an absolutely-positioned overlay
+ * within `shell.dialog` keeps it on top and on-screen on mobile.
+ */
+function confirmAction(
+  state: ManagerState,
+  title: string,
+  message: string,
+  opts: ConfirmOptions = {},
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = el("div", "tm-confirm-overlay");
+    const box = el("div", "tm-confirm-box");
+    box.appendChild(el("div", "tm-confirm-title", title));
+    box.appendChild(el("div", "tm-confirm-msg", message));
+
+    const actions = el("div", "tm-confirm-actions");
+    let settled = false;
+    const finish = (result: boolean): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+    // Beat the shell's document-level capture Esc handler (which would close
+    // the whole modal) by listening on window in the capture phase.
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(false);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        finish(true);
+      }
+    };
+
+    const cancel = button("Cancel", "tm-confirm-cancel", () => finish(false));
+    const ok = button(
+      opts.confirmLabel ?? "Confirm",
+      `tm-confirm-ok ${opts.danger ? "tm-btn-danger" : "tm-btn-primary"}`,
+      () => finish(true),
+    );
+    actions.append(cancel, ok);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    // Dismiss on backdrop tap (but not when tapping the box itself).
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) finish(false);
+    });
+
+    state.shell.dialog.appendChild(overlay);
+    window.addEventListener("keydown", onKey, true);
+    requestAnimationFrame(() => ok.focus());
+  });
 }
 
 // ============================================================
@@ -181,6 +235,20 @@ function ensureStyle(): void {
 .tm-badge-git { background: rgba(40,90,160,0.25); }
 .tm-badge-registry { background: rgba(120,60,160,0.25); }
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
+.tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tm-updates-head .tm-row-meta { margin-left: auto; }
+/* In-modal confirmation. The shell sits at z-index 9999; ComfyUI's own
+   PrimeVue confirm dialog renders BELOW it (≈1100) and is invisible behind
+   our backdrop — so we draw our own overlay inside the dialog instead. */
+.tm-confirm-overlay { position: absolute; inset: 0; z-index: 5; display: flex;
+  align-items: center; justify-content: center; padding: 16px;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
+.tm-confirm-box { width: min(460px, 100%); display: flex; flex-direction: column; gap: 12px;
+  padding: 18px; border-radius: 12px; background: var(--comfy-menu-bg, #1e1e1e);
+  border: 1px solid var(--border-color, #444); box-shadow: 0 16px 48px rgba(0,0,0,0.7); }
+.tm-confirm-title { font-size: 17px; font-weight: 700; }
+.tm-confirm-msg { font-size: 14px; line-height: 1.45; opacity: 0.9; word-break: break-word; }
+.tm-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .cmp-match { text-decoration: underline; }
 `;
   document.head.appendChild(s);
@@ -230,12 +298,31 @@ function restartBanner(state: ManagerState): HTMLElement {
 
 type TabId = "installed" | "updates" | "install" | "registry" | "core";
 
+/**
+ * Cached result of an Updates-tab "Check for updates" sweep. Holding this in
+ * state means revisiting the tab — or returning after updating ONE pack —
+ * doesn't re-fetch every git remote again. `checkedAt` drives a "last checked"
+ * label; `complete` distinguishes an in-progress sweep from a finished one.
+ */
+interface UpdatesCache {
+  results: UpdateCheckResult[];
+  total: number;
+  checkedAt: number;
+  complete: boolean;
+}
+
 interface ManagerState {
   shell: ModalShellController;
   config: ManagerConfig | null;
   installed: InstalledPack[];
   activeTab: TabId;
   restartPending: boolean;
+  /** Cached update-check sweep, or null until the first check. */
+  updates: UpdatesCache | null;
+  /** Per-tab filter text, so switching tabs doesn't leak one query into another. */
+  search: { installed: string; updates: string };
+  /** Saved Updates-list scroll offset, restored on back-navigation / re-entry. */
+  updatesScroll: number;
 }
 
 /** Open the Touch Node Manager modal. Safe to call repeatedly. */
@@ -262,6 +349,9 @@ export function openManager(): void {
     installed: [],
     activeTab: "installed",
     restartPending: false,
+    updates: null,
+    search: { installed: "", updates: "" },
+    updatesScroll: 0,
   };
 
   // Tab bar lives in the shell toolbar row.
@@ -283,22 +373,27 @@ export function openManager(): void {
   }
   shell.toolbarEl.appendChild(tabBar);
 
-  function setSearchVisible(visible: boolean): void {
-    const row = shell.searchEl.parentElement;
-    if (row) row.style.display = visible ? "" : "none";
-  }
-
   function selectTab(id: TabId): void {
+    // Leaving the Updates tab: remember where the list was scrolled to.
+    if (state.activeTab === "updates") state.updatesScroll = shell.bodyEl.scrollTop;
     state.activeTab = id;
     for (const [tid, b] of tabButtons) b.classList.toggle("tm-active", tid === id);
-    setSearchVisible(id === "installed");
+    // Restore the active tab's own query into the shared search box so a filter
+    // typed on one tab doesn't bleed into another.
+    syncSearch(state);
     shell.setStatus("");
     void renderActiveTab(state, id);
   }
 
-  // Wire the shell search to re-render the Installed list.
+  // Wire the shell search to re-filter whichever filterable tab is active.
   shell.searchEl.addEventListener("input", () => {
-    if (state.activeTab === "installed") renderInstalledList(state);
+    if (state.activeTab === "installed") {
+      state.search.installed = shell.searchEl.value;
+      renderInstalledList(state);
+    } else if (state.activeTab === "updates") {
+      state.search.updates = shell.searchEl.value;
+      repaintUpdatesList(state);
+    }
   });
 
   // Initial load: config drives the Install tab gating.
@@ -339,6 +434,26 @@ function resetBody(state: ManagerState): HTMLElement {
   const section = el("div", "tm-section");
   body.appendChild(section);
   return section;
+}
+
+/**
+ * Show the shared search row only where there's something to filter — the
+ * Installed list, or the Updates list once a sweep is cached — and restore that
+ * tab's own query + placeholder. Filtering an empty "Check for updates" prompt
+ * would just look broken, so the box stays hidden there until results exist.
+ */
+function syncSearch(state: ManagerState): void {
+  const onInstalled = state.activeTab === "installed";
+  const onUpdates = state.activeTab === "updates" && state.updates != null;
+  const row = state.shell.searchEl.parentElement;
+  if (row) row.style.display = onInstalled || onUpdates ? "" : "none";
+  if (onInstalled) {
+    state.shell.searchEl.placeholder = "Filter installed packs…";
+    state.shell.searchEl.value = state.search.installed;
+  } else if (onUpdates) {
+    state.shell.searchEl.placeholder = "Filter updates…";
+    state.shell.searchEl.value = state.search.updates;
+  }
 }
 
 function markRestartPending(state: ManagerState): void {
@@ -427,14 +542,50 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   return row;
 }
 
-async function doUpdate(state: ManagerState, name: string, ref?: string): Promise<void> {
+interface UpdateOptions {
+  /** Branch / tag to check out instead of fast-forwarding the tracked branch. */
+  ref?: string;
+  /** Which tab the action came from — drives the "Back" target after success. */
+  origin?: TabId;
+}
+
+/** Drop a pack from the cached updates sweep (it is now at its target). */
+function removeFromUpdatesCache(state: ManagerState, name: string): void {
+  if (!state.updates) return;
+  state.updates.results = state.updates.results.filter((r) => r.name !== name);
+}
+
+/** The Back affordance shown on the post-update panel, per origin tab. */
+function updateResultBack(state: ManagerState, origin: TabId | undefined): HTMLButtonElement {
+  if (origin === "updates") {
+    // Return to the Updates list (cached, filtered, scroll restored) rather than
+    // re-checking every remote again.
+    return button("← Back to updates", "", () => void renderUpdatesTab(state));
+  }
+  return button("← Back to installed", "", () => void renderInstalledTab(state));
+}
+
+async function doUpdate(
+  state: ManagerState,
+  name: string,
+  opts: UpdateOptions = {},
+): Promise<void> {
+  // Coming from the Updates list: remember the scroll offset so Back lands in
+  // the same place.
+  if (opts.origin === "updates") state.updatesScroll = state.shell.bodyEl.scrollTop;
   state.shell.setBusy(true);
   try {
-    const result = await apiPost<UpdateResult>("update", ref ? { name, ref } : { name });
+    const result = await apiPost<UpdateResult>(
+      "update",
+      opts.ref ? { name, ref: opts.ref } : { name },
+    );
     markRestartPending(state);
+    // The pack is now at its target — keep the cached sweep honest so it does
+    // not keep advertising an update for a pack we just updated.
+    removeFromUpdatesCache(state, name);
     toast("success", `Updated ${name}`, formatUpdateSummary(result));
     state.shell.setBusy(false);
-    renderUpdateResult(state, { ...result, name });
+    renderUpdateResult(state, { ...result, name }, updateResultBack(state, opts.origin));
   } catch (e) {
     const err = e as ManagerError;
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
@@ -443,9 +594,13 @@ async function doUpdate(state: ManagerState, name: string, ref?: string): Promis
 }
 
 /** A panel summarising exactly what an update applied (SHAs, commits, files). */
-function renderUpdateResult(state: ManagerState, result: UpdateResult): void {
+function renderUpdateResult(
+  state: ManagerState,
+  result: UpdateResult,
+  back: HTMLButtonElement,
+): void {
   const section = resetBody(state);
-  section.appendChild(button("← Back to installed", "", () => void renderInstalledTab(state)));
+  section.appendChild(back);
   section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
   section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
 
@@ -465,14 +620,18 @@ function renderUpdateResult(state: ManagerState, result: UpdateResult): void {
 
 async function doUninstall(state: ManagerState, name: string): Promise<void> {
   const ok = await confirmAction(
+    state,
     "Disable pack?",
     `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
+    { confirmLabel: "Disable", danger: true },
   );
   if (!ok) return;
   state.shell.setBusy(true);
   try {
     await apiPost("uninstall", { name });
     markRestartPending(state);
+    // The pack set changed — the cached updates sweep is now stale.
+    state.updates = null;
     toast("success", `Disabled ${name}`, "Restart ComfyUI to apply.");
     await renderInstalledTab(state);
   } catch (e) {
@@ -531,7 +690,7 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
       r.appendChild(el("div", "tm-row-title", ref));
       const actions = el("div", "tm-row-actions");
       actions.appendChild(
-        button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, ref)),
+        button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, { ref })),
       );
       r.appendChild(actions);
       list.appendChild(r);
@@ -551,7 +710,11 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
       r.appendChild(el("div", "tm-row-meta", meta.join(" · ")));
       const actions = el("div", "tm-row-actions");
       actions.appendChild(
-        button("Checkout", "tm-btn-primary", () => void doUpdate(state, pack.name, rel.tag)),
+        button(
+          "Checkout",
+          "tm-btn-primary",
+          () => void doUpdate(state, pack.name, { ref: rel.tag }),
+        ),
       );
       r.appendChild(actions);
       list.appendChild(r);
@@ -562,34 +725,153 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
 
 // ============================================================
 // Updates tab
+//
+// A "Check for updates" sweep is CACHED on the state. Revisiting the tab — or
+// returning after updating a single pack — repaints the cached results instead
+// of re-fetching every git remote. The list is filterable (shared search box)
+// and its scroll offset is restored on back-navigation.
 // ============================================================
 
+/** Short "Last checked HH:MM" label from a cache timestamp. */
+function lastCheckedLabel(cache: UpdatesCache): string {
+  const t = new Date(cache.checkedAt);
+  const hh = String(t.getHours()).padStart(2, "0");
+  const mm = String(t.getMinutes()).padStart(2, "0");
+  return `Last checked ${hh}:${mm}`;
+}
+
 async function renderUpdatesTab(state: ManagerState): Promise<void> {
-  const section = resetBody(state);
-  section.appendChild(
-    button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)),
-  );
-  section.appendChild(
-    el(
-      "div",
-      "tm-note tm-note-info",
-      "Fetches each git pack's remote and compares against the tracked branch.",
-    ),
-  );
+  // No sweep cached yet → the initial prompt.
+  if (!state.updates) {
+    const section = resetBody(state);
+    section.appendChild(
+      button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)),
+    );
+    section.appendChild(
+      el(
+        "div",
+        "tm-note tm-note-info",
+        "Fetches each git pack's remote and compares against the tracked branch. " +
+          "Results are cached — update a pack and come back without re-checking everything.",
+      ),
+    );
+    return;
+  }
+  // Cache present → repaint it (filtered), restoring the saved scroll offset.
+  paintUpdatesTab(state);
+  restoreUpdatesScroll(state);
+}
+
+/** Restore the saved Updates-list scroll offset after the next layout. */
+function restoreUpdatesScroll(state: ManagerState): void {
+  const top = state.updatesScroll;
+  if (top <= 0) return;
+  requestAnimationFrame(() => {
+    state.shell.bodyEl.scrollTop = top;
+  });
 }
 
 /** A single Updates-tab row for a pack with an available update. */
-function updateRow(state: ManagerState, info: UpdateCheckResult): HTMLElement {
+function updateRow(
+  state: ManagerState,
+  info: UpdateCheckResult,
+  matches: number[] = [],
+): HTMLElement {
   const r = el("div", "tm-row");
-  r.appendChild(el("div", "tm-row-title", info.name));
+  const title = el("div", "tm-row-title");
+  title.appendChild(highlightMatches(info.name, matches));
+  r.appendChild(title);
   r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
   for (const c of info.incoming) {
     r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
   }
   const actions = el("div", "tm-row-actions");
-  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name)));
+  actions.appendChild(
+    button(
+      "Update",
+      "tm-btn-primary",
+      () => void doUpdate(state, info.name, { origin: "updates" }),
+    ),
+  );
   r.appendChild(actions);
   return r;
+}
+
+/**
+ * Lay out the static structure of a cache-backed Updates tab once: a head
+ * (Re-check + last-checked label), the list container, and the errors block.
+ * `repaintUpdatesList` fills the dynamic parts and is also what streaming and
+ * filtering call — so neither resets body scroll.
+ */
+function paintUpdatesTab(state: ManagerState): void {
+  if (!state.updates) return;
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-updates-head"));
+  section.appendChild(el("div", "tm-list tm-updates-list"));
+  section.appendChild(el("div", "tm-section tm-updates-errors"));
+  // A cache now exists — reveal the filter box if we're on the Updates tab.
+  syncSearch(state);
+  repaintUpdatesList(state);
+}
+
+/**
+ * Repaint the head, list, errors, and status from the cached sweep applying the
+ * current filter. Only the inner containers are replaced — body scroll is left
+ * untouched, so this is safe to call on every streamed result and keystroke.
+ */
+function repaintUpdatesList(state: ManagerState): void {
+  const cache = state.updates;
+  if (!cache) return;
+  const body = state.shell.bodyEl;
+  const head = body.querySelector<HTMLElement>(".tm-updates-head");
+  const list = body.querySelector<HTMLElement>(".tm-updates-list");
+  const errorsWrap = body.querySelector<HTMLElement>(".tm-updates-errors");
+  if (!head || !list) return;
+
+  // Head: Re-check (disabled mid-sweep) + a last-checked / progress label.
+  head.replaceChildren();
+  const recheck = button("Re-check", "tm-btn-primary", () => void checkUpdates(state));
+  recheck.disabled = !cache.complete;
+  head.appendChild(recheck);
+  head.appendChild(
+    el("div", "tm-row-meta", cache.complete ? lastCheckedLabel(cache) : "checking…"),
+  );
+
+  const { actionable, errored } = partitionUpdateResults(cache.results);
+  // Fuzzy-filter the actionable rows by pack name (reusing the installed-list
+  // ranker), carrying match indices for highlighting.
+  const ranked = filterPacks(state.search.updates, actionable);
+
+  list.replaceChildren();
+  for (const { pack, primaryMatches } of ranked) {
+    list.appendChild(updateRow(state, pack, primaryMatches));
+  }
+  if (ranked.length === 0) {
+    const message =
+      actionable.length > 0
+        ? "No matches."
+        : cache.complete
+          ? "Everything is up to date."
+          : "Checking…";
+    list.appendChild(emptyState(message));
+  }
+
+  if (errorsWrap) {
+    errorsWrap.replaceChildren();
+    if (errored.length > 0) {
+      errorsWrap.appendChild(el("div", "tm-field-label", "Could not check"));
+      for (const e of errored) {
+        errorsWrap.appendChild(el("div", "tm-row-meta", `${e.name}: ${e.error}`));
+      }
+    }
+  }
+
+  // Status: live progress while sweeping, otherwise a filtered/total count.
+  state.shell.setStatus(
+    cache.complete
+      ? `${ranked.length}/${actionable.length}`
+      : formatProgress(cache.results.length, cache.total),
+  );
 }
 
 // How many per-pack checks run concurrently. Small, so a long fetch can't stall
@@ -598,39 +880,50 @@ const UPDATE_CHECK_CONCURRENCY = 3;
 
 /**
  * Progressive update check: fetch the git-pack names fast, then check each pack
- * one at a time (bounded concurrency), streaming rows into the list and ticking
- * a "checked N/M" progress label as results arrive.
+ * (bounded concurrency), streaming results into the cached sweep and repainting
+ * the list as they arrive. The cache is keyed by object identity — if the user
+ * starts another sweep (or navigates away and back), the superseded worker bails
+ * rather than scribbling into the new cache.
  */
 async function checkUpdates(state: ManagerState): Promise<void> {
+  // Begin a fresh sweep. A new cache object also acts as the identity guard.
+  const cache: UpdatesCache = { results: [], total: 0, checkedAt: Date.now(), complete: false };
+  state.updates = cache;
+  // A re-check from a filtered view shouldn't keep the stale filter visible
+  // results jumping — reset the saved scroll so the fresh sweep starts at top.
+  state.updatesScroll = 0;
+
   const section = resetBody(state);
-  section.appendChild(
-    button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)),
-  );
+  section.appendChild(emptyState("Listing git-backed packs…"));
+  state.shell.setBusy(true);
 
   let names: string[];
   try {
     const data = await apiGet<{ packs: UpdatesListEntry[] }>("updates/list");
     names = (data.packs ?? []).map((p) => p.name);
   } catch (e) {
-    section.appendChild(emptyState(`Failed: ${(e as Error).message}`));
+    state.shell.setBusy(false);
+    if (state.updates !== cache) return; // superseded
+    state.updates = null;
+    const s = resetBody(state);
+    s.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
+    s.appendChild(emptyState(`Failed: ${(e as Error).message}`));
     return;
   }
+  state.shell.setBusy(false);
+  if (state.updates !== cache) return; // superseded while listing
 
+  cache.total = names.length;
   if (names.length === 0) {
-    section.appendChild(emptyState("No git-backed packs to check."));
+    cache.complete = true;
+    paintUpdatesTab(state);
     return;
   }
 
-  const total = names.length;
-  state.shell.setStatus(formatProgress(0, total));
-  const list = el("div", "tm-list");
-  section.appendChild(list);
-  const errors = el("div", "tm-section");
+  // Lay out the cache-backed tab; workers repaint it as results stream in.
+  paintUpdatesTab(state);
 
-  const results: UpdateCheckResult[] = [];
-  let done = 0;
   let cursor = 0;
-
   const worker = async (): Promise<void> => {
     while (cursor < names.length) {
       const name = names[cursor++];
@@ -648,11 +941,9 @@ async function checkUpdates(state: ManagerState): Promise<void> {
           incoming: [],
         };
       }
-      results.push(info);
-      if (info.update_available && !info.error) list.appendChild(updateRow(state, info));
-      else if (info.error)
-        errors.appendChild(el("div", "tm-row-meta", `${info.name}: ${info.error}`));
-      state.shell.setStatus(formatProgress(++done, total));
+      if (state.updates !== cache) return; // a newer sweep took over
+      cache.results.push(info);
+      if (state.activeTab === "updates") repaintUpdatesList(state);
     }
   };
 
@@ -660,12 +951,9 @@ async function checkUpdates(state: ManagerState): Promise<void> {
     Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()),
   );
 
-  const { actionable, errored } = partitionUpdateResults(results);
-  if (actionable.length === 0) list.appendChild(emptyState("Everything is up to date."));
-  if (errored.length > 0) {
-    section.appendChild(el("div", "tm-field-label", "Could not check"));
-    section.appendChild(errors);
-  }
+  if (state.updates !== cache) return; // superseded
+  cache.complete = true;
+  if (state.activeTab === "updates") repaintUpdatesList(state);
 }
 
 // ============================================================
@@ -776,8 +1064,10 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
     return;
   }
   const ok = await confirmAction(
+    state,
     "Install pack?",
     `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`,
+    { confirmLabel: "Install" },
   );
   if (!ok) return;
 
@@ -787,6 +1077,7 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
     if (ref.trim()) body.ref = ref.trim();
     const res = await apiPost<{ name: string }>("install", body);
     markRestartPending(state);
+    state.updates = null;
     toast("success", `Installed ${res.name}`, "Restart ComfyUI to apply.");
     // Refresh installed list and switch to it.
     await renderInstalledTab(state);
@@ -981,9 +1272,11 @@ async function doRegistryInstall(
 ): Promise<void> {
   const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
   const ok = await confirmAction(
+    state,
     "Install from registry?",
     `Download and install ${label} from the Comfy Registry into custom_nodes? ` +
       "Only install code you trust. A restart is required.",
+    { confirmLabel: "Install" },
   );
   if (!ok) return;
 
@@ -993,6 +1286,7 @@ async function doRegistryInstall(
     if (version) body.version = version;
     const res = await apiPost<RegistryInstallResult>("registry/install", body);
     markRestartPending(state);
+    state.updates = null;
     const detail = res.deps_changed
       ? "Python dependencies changed — install them, then restart."
       : "Restart ComfyUI to apply.";
@@ -1073,8 +1367,10 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
  */
 async function doReboot(state: ManagerState): Promise<void> {
   const ok = await confirmAction(
+    state,
     "Restart ComfyUI?",
     "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+    { confirmLabel: "Restart now", danger: true },
   );
   if (!ok) return;
   toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
@@ -1101,8 +1397,10 @@ async function doReboot(state: ManagerState): Promise<void> {
 
 async function doCoreUpdate(state: ManagerState): Promise<void> {
   const ok = await confirmAction(
+    state,
     "Update ComfyUI core?",
     "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.",
+    { confirmLabel: "Update core" },
   );
   if (!ok) return;
   state.shell.setBusy(true);

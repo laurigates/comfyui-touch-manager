@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.5...comfyui-touch-manager-v0.1.6) (2026-06-28)
+
+
+### Miscellaneous
+
+* sync uv.lock to 0.1.5 and auto-bump it via release-please ([#18](https://github.com/laurigates/comfyui-touch-manager/issues/18)) ([65bde87](https://github.com/laurigates/comfyui-touch-manager/commit/65bde871cc1615162bb1f24f3995faa95a8c76a2))
+
 ## [0.1.5](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.4...comfyui-touch-manager-v0.1.5) (2026-06-27)
 
 

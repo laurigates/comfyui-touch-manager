@@ -95,7 +95,6 @@ zoom during a gesture, intercept `wheel` (capture, `passive:false`,
 
 Merge the release-please PR → the published GitHub release triggers
 `publish.yml`, which runs `bun run build`, publishes via
-`Comfy-Org/publish-node-action`, and pushes the release notes to the registry
-version changelog (the "Updates" section). Requires the
+`Comfy-Org/publish-node-action`, attaching the release notes as the per-version registry changelog (the "Updates" section). Requires the
 `REGISTRY_ACCESS_TOKEN` repo secret. Use conventional commits; release-please
 maintains `CHANGELOG.md` and the version bump PR.

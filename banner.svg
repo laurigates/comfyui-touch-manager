@@ -46,11 +46,11 @@
   <g transform="translate(96,188) scale(0.5)">
     <rect x="28" y="28" width="344" height="344" rx="76" fill="url(#tile)" stroke="#2a2a36" stroke-width="2"/>
     <g fill="none" stroke="#ffb02e" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M178.6 107.4 A95 95 0 1 1 221.4 107.4"/>
-      <path d="M198 88 L221.4 107.4 L234 80"/>
-      <rect x="154" y="168" width="92" height="64" rx="14"/>
+      <path d="M172.6 124.8 A80 80 0 1 0 227.4 124.8"/>
+      <path d="M248.7 109.9 L227.4 124.8 L220.6 99.7"/>
+      <rect x="156" y="170" width="88" height="60" rx="14"/>
     </g>
-    <circle cx="200" cy="200" r="11" fill="#ffb02e"/>
+    <circle cx="200" cy="200" r="10" fill="#ffb02e"/>
   </g>
 
   <!-- wordmark -->

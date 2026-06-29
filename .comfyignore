@@ -38,5 +38,6 @@ justfile
 CLAUDE.md
 RELEASE-CHECKLIST.md
 
-# Source-form icon (PNG icon + banner display assets are kept)
+# Source-form vector art (PNG icon + banner display assets are kept)
 icon.svg
+banner.svg

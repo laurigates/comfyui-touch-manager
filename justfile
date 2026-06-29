@@ -42,3 +42,15 @@ test:
 # Typecheck + build + lint + test in one shot — the local CI gate.
 [group: "quality"]
 check: typecheck build lint test
+
+##########
+# Docs
+##########
+
+# Regenerate the README screenshot (docs/manager.png) via the containerized
+# Playwright + ComfyUI pipeline. First build is several minutes; see
+# screenshots/README.md.
+[group: "docs"]
+screenshots:
+    docker build -f screenshots/Dockerfile -t comfyui-touch-manager-screenshots .
+    docker run --rm -v "$(pwd)/docs:/out" comfyui-touch-manager-screenshots

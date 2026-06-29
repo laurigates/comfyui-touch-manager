@@ -1,0 +1,9 @@
+{
+  "name": "comfyui-touch-manager-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "Playwright driver for generating README screenshots of comfyui-touch-manager.",
+  "dependencies": {
+    "playwright": "1.49.1"
+  }
+}

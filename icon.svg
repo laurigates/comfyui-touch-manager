@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f1f2a"/>
+      <stop offset="1" stop-color="#12121a"/>
+    </linearGradient>
+  </defs>
+  <rect x="28" y="28" width="344" height="344" rx="76" fill="url(#tile)" stroke="#2a2a36" stroke-width="2"/>
+  <g fill="none" stroke="#ffb02e" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <!-- update ring: ~320° refresh arc (R=80, centered), small gap at top -->
+    <path d="M172.6 124.8 A80 80 0 1 0 227.4 124.8"/>
+    <!-- arrowhead at the ring head, pointing tangentially (direction of spin) -->
+    <path d="M242.3 146.1 L227.4 124.8 L252.5 118.0"/>
+    <!-- managed node body -->
+    <rect x="156" y="170" width="88" height="60" rx="14"/>
+  </g>
+  <circle cx="200" cy="200" r="10" fill="#ffb02e"/>
+</svg>

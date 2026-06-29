@@ -50,7 +50,8 @@ addopts = "--import-mode=importlib"
 [tool.comfy]
 PublisherId = "laurigates"
 DisplayName = "Touch Node Manager"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/laurigates/comfyui-touch-manager/main/icon.png"
+Banner = "https://raw.githubusercontent.com/laurigates/comfyui-touch-manager/main/banner.png"
 # The built frontend (web/dist/) is git-ignored — emitted by `bun run build`.
 # publish-node-action honors [tool.comfy] includes to force-add otherwise-
 # ignored paths into the published tarball. See ADR-0001.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.6...comfyui-touch-manager-v0.1.7) (2026-06-29)
+
+
+### Miscellaneous
+
+* finish scaffold — registry assets, screenshot pipeline, renovate/CI sync ([#21](https://github.com/laurigates/comfyui-touch-manager/issues/21)) ([87368c0](https://github.com/laurigates/comfyui-touch-manager/commit/87368c0d0a4359f78f8a35cecb29ca59c38e648a))
+
 ## [0.1.6](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.5...comfyui-touch-manager-v0.1.6) (2026-06-28)
 
 

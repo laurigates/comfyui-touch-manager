@@ -9,9 +9,8 @@
   <g fill="none" stroke="#ffb02e" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
     <!-- update ring: ~320° refresh arc (R=80, centered), small gap at top -->
     <path d="M172.6 124.8 A80 80 0 1 0 227.4 124.8"/>
-    <!-- arrowhead at the ring head, pointing radially inward (perpendicular to
-         the shaft) — the update flows down into the node -->
-    <path d="M248.7 109.9 L227.4 124.8 L220.6 99.7"/>
+    <!-- arrowhead at the ring head, pointing tangentially (direction of spin) -->
+    <path d="M242.3 146.1 L227.4 124.8 L252.5 118.0"/>
     <!-- managed node body -->
     <rect x="156" y="170" width="88" height="60" rx="14"/>
   </g>

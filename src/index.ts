@@ -13,6 +13,7 @@
 //
 // The shared modal primitives come from @laurigates/comfy-modal-kit and are
 // INLINED by `bun build` — not copied into this pack.
+import { notify } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { openManager } from "./touch-manager-ui";
 
@@ -26,6 +27,18 @@ function safeOpen(): void {
     openManager();
   } catch (e) {
     console.error(`[${EXT_NAME}] failed to open node manager`, e);
+    // Surface the tapped-action failure via a copyable popup, not just the
+    // devtools trail (comfyui-error-popups-copyable.md). Guard notify() itself
+    // so a rendering failure can't bubble past this defensive boundary.
+    try {
+      notify({
+        severity: "error",
+        summary: "Could not open Touch Node Manager",
+        detail: String(e),
+      });
+    } catch (notifyErr) {
+      console.warn(`[${EXT_NAME}] notify failed`, notifyErr);
+    }
   }
 }
 

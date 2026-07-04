@@ -1,6 +1,3 @@
-// src/index.ts
-import { app as app2 } from "/scripts/app.js";
-
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
 function fuzzyScore(query, target) {
   if (!query)
@@ -602,6 +599,9 @@ function openModalShell(opts = {}) {
   }
   return controller;
 }
+
+// src/index.ts
+import { app as app2 } from "/scripts/app.js";
 
 // src/touch-manager-ui.ts
 import { app } from "/scripts/app.js";
@@ -1768,6 +1768,15 @@ function safeOpen() {
     openManager();
   } catch (e) {
     console.error(`[${EXT_NAME2}] failed to open node manager`, e);
+    try {
+      notify({
+        severity: "error",
+        summary: "Could not open Touch Node Manager",
+        detail: String(e)
+      });
+    } catch (notifyErr) {
+      console.warn(`[${EXT_NAME2}] notify failed`, notifyErr);
+    }
   }
 }
 app2.registerExtension({

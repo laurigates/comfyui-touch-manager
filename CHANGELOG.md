@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.7...comfyui-touch-manager-v0.1.8) (2026-07-04)
+
+
+### Bug Fixes
+
+* **instrumentation:** surface open-manager failure via copyable notify() ([#25](https://github.com/laurigates/comfyui-touch-manager/issues/25)) ([8dc86a7](https://github.com/laurigates/comfyui-touch-manager/commit/8dc86a7f3c9e0aed8742e315b425e12dc4ba8090))
+
 ## [0.1.7](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.6...comfyui-touch-manager-v0.1.7) (2026-06-29)
 
 

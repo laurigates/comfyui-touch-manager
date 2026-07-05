@@ -1249,7 +1249,7 @@ def test_install_deps_runs_requirements(tmp_path, stub_pip):
     assert result["ok"] is True
     assert result["sources"] == ["requirements.txt"]
     # pip install -r <path>, run in the pack dir.
-    (args, cwd), = stub_pip
+    ((args, cwd),) = stub_pip
     assert args == ["-r", os.path.join(str(tmp_path), "requirements.txt")]
     assert cwd == str(tmp_path)
 
@@ -1262,15 +1262,13 @@ def test_install_deps_runs_pyproject_with_option_guard(tmp_path, stub_pip):
     assert result["attempted"] is True
     assert result["sources"] == ["pyproject.toml"]
     # "--" stops pip option parsing before the specs (argument-injection guard).
-    (args, _cwd), = stub_pip
+    ((args, _cwd),) = stub_pip
     assert args == ["--", "numpy>=1.0"]
 
 
 def test_install_deps_runs_both_sources(tmp_path, stub_pip):
     (tmp_path / "requirements.txt").write_text("numpy\n")
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "x"\ndependencies = ["pillow"]\n'
-    )
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = ["pillow"]\n')
     result = pack._install_deps(str(tmp_path))
     assert result["sources"] == ["requirements.txt", "pyproject.toml"]
     assert len(stub_pip) == 2  # one invocation per source
@@ -1308,7 +1306,7 @@ def test_update_installs_deps_when_requirements_changed(tmp_path, stub_pip):
     assert body["deps"]["attempted"] is True
     assert body["deps"]["ok"] is True
     # pip actually ran, targeting the updated pack.
-    (args, cwd), = stub_pip
+    ((args, cwd),) = stub_pip
     assert args[0] == "-r"
     assert cwd == str(root / "pack")
 
@@ -1363,7 +1361,7 @@ def test_core_update_installs_deps(tmp_path, stub_pip):
     body = _post(pack.core_update).json_body
     assert body["deps_changed"] is True
     assert body["deps"]["attempted"] is True
-    (args, cwd), = stub_pip
+    ((args, cwd),) = stub_pip
     assert args[0] == "-r"
     assert cwd == str(core_dir)
 
@@ -1387,7 +1385,7 @@ def test_install_installs_deps_from_clone(monkeypatch, tmp_path, stub_pip):
     body = _post(pack.install, url="https://github.com/owner/repo").json_body
     assert body["ok"] is True
     assert body["deps"]["attempted"] is True
-    (args, cwd), = stub_pip
+    ((args, cwd),) = stub_pip
     assert args[0] == "-r"
     assert cwd == str(root / "repo")
 
@@ -1398,6 +1396,6 @@ def test_registry_install_installs_deps(monkeypatch, tmp_path, stub_pip):
     body = _post(pack.registry_install, id="comfyui-foo").json_body
     assert body["deps_changed"] is True
     assert body["deps"]["attempted"] is True
-    (args, cwd), = stub_pip
+    ((args, cwd),) = stub_pip
     assert args[0] == "-r"
     assert cwd == str(root / "comfyui-foo")

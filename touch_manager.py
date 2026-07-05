@@ -954,9 +954,7 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
         if rc == 0:
             files = [line for line in names.splitlines() if line.strip()]
             result["changed_files"] = len(files)
-            result["deps_changed"] = any(
-                os.path.basename(f) in _DEPS_FILES for f in files
-            )
+            result["deps_changed"] = any(os.path.basename(f) in _DEPS_FILES for f in files)
     return result, "", ""
 
 
@@ -1195,9 +1193,7 @@ async def install(request: web.Request) -> web.Response:
 
     # Fresh clone: install its Python deps so the pack loads on next start.
     deps = await _run(_install_deps, target)
-    return web.json_response(
-        {"ok": True, "name": name, "deps": deps, "restart_required": True}
-    )
+    return web.json_response({"ok": True, "name": name, "deps": deps, "restart_required": True})
 
 
 @PromptServer.instance.routes.post("/touch_manager/update")

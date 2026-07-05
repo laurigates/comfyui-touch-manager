@@ -1215,3 +1215,189 @@ def test_error_envelope_shape(monkeypatch, tmp_path):
     assert resp.json_body["ok"] is False
     assert isinstance(resp.json_body["error"], str)
     assert isinstance(resp.json_body["code"], str)
+
+
+# ===========================================================================
+# Dependency installation (pip)
+# ===========================================================================
+
+
+def test_pyproject_deps_parses_project_dependencies(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["numpy>=1.0", "pillow"]\n'
+        '[build-system]\nrequires = ["setuptools"]\n'
+    )
+    # build-system.requires must NOT leak in — only [project.dependencies].
+    assert pack._pyproject_deps(str(tmp_path / "pyproject.toml")) == ["numpy>=1.0", "pillow"]
+
+
+def test_pyproject_deps_missing_or_empty_is_empty(tmp_path):
+    (tmp_path / "no-deps.toml").write_text('[project]\nname = "x"\n')
+    assert pack._pyproject_deps(str(tmp_path / "no-deps.toml")) == []
+    assert pack._pyproject_deps(str(tmp_path / "does-not-exist.toml")) == []
+
+
+def test_pyproject_deps_bad_toml_is_empty(tmp_path):
+    (tmp_path / "bad.toml").write_text("this is = = not toml [[[")
+    assert pack._pyproject_deps(str(tmp_path / "bad.toml")) == []
+
+
+def test_install_deps_runs_requirements(tmp_path, stub_pip):
+    (tmp_path / "requirements.txt").write_text("numpy\n")
+    result = pack._install_deps(str(tmp_path))
+    assert result["attempted"] is True
+    assert result["ok"] is True
+    assert result["sources"] == ["requirements.txt"]
+    # pip install -r <path>, run in the pack dir.
+    (args, cwd), = stub_pip
+    assert args == ["-r", os.path.join(str(tmp_path), "requirements.txt")]
+    assert cwd == str(tmp_path)
+
+
+def test_install_deps_runs_pyproject_with_option_guard(tmp_path, stub_pip):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["numpy>=1.0"]\n'
+    )
+    result = pack._install_deps(str(tmp_path))
+    assert result["attempted"] is True
+    assert result["sources"] == ["pyproject.toml"]
+    # "--" stops pip option parsing before the specs (argument-injection guard).
+    (args, _cwd), = stub_pip
+    assert args == ["--", "numpy>=1.0"]
+
+
+def test_install_deps_runs_both_sources(tmp_path, stub_pip):
+    (tmp_path / "requirements.txt").write_text("numpy\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["pillow"]\n'
+    )
+    result = pack._install_deps(str(tmp_path))
+    assert result["sources"] == ["requirements.txt", "pyproject.toml"]
+    assert len(stub_pip) == 2  # one invocation per source
+
+
+def test_install_deps_no_files_does_not_run_pip(tmp_path, stub_pip):
+    result = pack._install_deps(str(tmp_path))
+    assert result == {"attempted": False, "ok": None, "sources": [], "error": None, "log": ""}
+    assert stub_pip == []
+
+
+def test_install_deps_reports_pip_failure(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("numpy\n")
+    monkeypatch.setattr(pack, "_pip_install", lambda args, cwd, timeout=300: (1, "boom"))
+    result = pack._install_deps(str(tmp_path))
+    assert result["attempted"] is True
+    assert result["ok"] is False
+    assert "pip exited 1" in result["error"]
+    assert "boom" in result["log"]
+
+
+def test_update_installs_deps_when_requirements_changed(tmp_path, stub_pip):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed, fname="requirements.txt", content="numpy\n")
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["deps_changed"] is True
+    assert body["deps"]["attempted"] is True
+    assert body["deps"]["ok"] is True
+    # pip actually ran, targeting the updated pack.
+    (args, cwd), = stub_pip
+    assert args[0] == "-r"
+    assert cwd == str(root / "pack")
+
+
+def test_update_skips_deps_install_when_nothing_relevant_changed(tmp_path, stub_pip):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed)  # touches README.md only
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["deps_changed"] is False
+    assert body["deps"]["attempted"] is False
+    assert stub_pip == []  # no wasted pip resolve
+
+
+def test_update_installs_deps_on_pyproject_change(tmp_path, stub_pip):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(
+        seed,
+        fname="pyproject.toml",
+        content='[project]\nname = "p"\ndependencies = ["pillow"]\n',
+    )
+    _set_roots(root)
+
+    body = _post(pack.update, name="pack").json_body
+    assert body["deps_changed"] is True
+    assert body["deps"]["sources"] == ["pyproject.toml"]
+
+
+def test_core_update_installs_deps(tmp_path, stub_pip):
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    core_dir = tmp_path / "ComfyUI"
+    _clone(origin, core_dir)
+    _advance(seed, fname="requirements.txt", content="numpy\n")
+    folder_paths.base_path = str(core_dir)
+
+    body = _post(pack.core_update).json_body
+    assert body["deps_changed"] is True
+    assert body["deps"]["attempted"] is True
+    (args, cwd), = stub_pip
+    assert args[0] == "-r"
+    assert cwd == str(core_dir)
+
+
+def test_install_installs_deps_from_clone(monkeypatch, tmp_path, stub_pip):
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+
+    def fake_git(args, cwd, timeout=60):
+        if args[0] == "clone":
+            target = args[2]
+            os.makedirs(target, exist_ok=True)
+            # A real clone lands the pack's requirements.txt.
+            with open(os.path.join(target, "requirements.txt"), "w") as fh:
+                fh.write("numpy\n")
+        return 0, "", ""
+
+    monkeypatch.setattr(pack, "_git", fake_git)
+    body = _post(pack.install, url="https://github.com/owner/repo").json_body
+    assert body["ok"] is True
+    assert body["deps"]["attempted"] is True
+    (args, cwd), = stub_pip
+    assert args[0] == "-r"
+    assert cwd == str(root / "repo")
+
+
+def test_registry_install_installs_deps(monkeypatch, tmp_path, stub_pip):
+    archive = _zip_bytes({"__init__.py": "# node\n", "requirements.txt": "numpy\n"})
+    root = _registry_install_setup(monkeypatch, tmp_path, archive)
+    body = _post(pack.registry_install, id="comfyui-foo").json_body
+    assert body["deps_changed"] is True
+    assert body["deps"]["attempted"] is True
+    (args, cwd), = stub_pip
+    assert args[0] == "-r"
+    assert cwd == str(root / "comfyui-foo")

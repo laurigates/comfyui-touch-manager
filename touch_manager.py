@@ -3,12 +3,15 @@
 A touch-first node/extension manager for ComfyUI. The backend performs
 self-contained git operations (enumerate installed packs, check for updates,
 install from a URL, switch versions, update core) behind a small JSON HTTP
-surface the frontend modal drives. It restarts NOTHING — every mutating route
-just sets ``restart_required: true`` and leaves the restart to the user.
+surface the frontend modal drives. After a git operation lands new/changed code
+it installs that code's Python dependencies (requirements.txt / pyproject.toml)
+so the pack is not left half-installed — but it restarts NOTHING: every mutating
+route sets ``restart_required: true`` and leaves the restart to the user.
 
 Uses ComfyUI-bundled libraries ONLY (aiohttp, plus folder_paths / server from
 ComfyUI core) and the Python standard library (subprocess, os, asyncio, json,
-re, urllib). Do not add a Python dependency that ComfyUI does not already ship.
+re, urllib, tomllib). Dependency installation shells out to the running
+interpreter's own pip (``python -m pip``); no third-party lib is imported.
 
 Route surface (all under /touch_manager/, all return {"ok": bool, ...}; errors
 are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
@@ -18,10 +21,10 @@ are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
   GET  /touch_manager/updates     — per-pack behind/ahead vs upstream (fetches)
   GET  /touch_manager/versions    — branches/tags/releases for one pack
   POST /touch_manager/install     — clone a github/gitlab URL into roots[0]
-  POST /touch_manager/update      — fetch + checkout/ff one pack
+  POST /touch_manager/update      — fetch + checkout/ff one pack, install deps
   POST /touch_manager/uninstall   — reversible disable (rename to .disabled)
   GET  /touch_manager/core        — core repo ref/behind/dirty/remotes
-  POST /touch_manager/core/update — git pull core; report requirements drift
+  POST /touch_manager/core/update — git pull core; install deps on drift
   POST /touch_manager/reboot      — opt-in os.execv stub (disabled by default)
 
 Security perimeter (enforced here, surfaced in the frontend via /config):
@@ -51,6 +54,11 @@ import zipfile
 from json import JSONDecodeError, loads
 from typing import Any
 from urllib.parse import urlencode, urlparse
+
+try:  # stdlib on Python 3.11+; guarded so a 3.10 host degrades to "no pyproject deps"
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - depends on interpreter version
+    tomllib = None  # type: ignore[assignment]
 
 import folder_paths
 from aiohttp import web
@@ -598,6 +606,128 @@ def _do_registry_install(
 
 
 # ---------------------------------------------------------------------------
+# Dependency installation (pip against the running interpreter)
+# ---------------------------------------------------------------------------
+#
+# A git update that lands a new requirements.txt / pyproject.toml but does NOT
+# install it leaves ComfyUI in a broken state: the pack's Python imports fail on
+# the next start. So every route that lands new code follows the git operation
+# with a dependency install into the SAME interpreter running ComfyUI
+# (``sys.executable -m pip``). This is blocking work — always call via ``_run``.
+
+# Cap captured pip output so a chatty install can't bloat the JSON response.
+_DEPS_LOG_TAIL = 4000
+
+# Filenames that, when present/changed, mean a pack's Python deps need (re)install.
+_DEPS_FILES = ("requirements.txt", "pyproject.toml")
+
+
+def _tail(text: str, cap: int) -> str:
+    """Return the last ``cap`` characters of ``text`` (whole string if shorter)."""
+    text = text.strip()
+    if len(text) <= cap:
+        return text
+    return "…" + text[-cap:]
+
+
+def _no_deps() -> dict[str, Any]:
+    """The 'nothing installed' deps record, shared by every non-attempt path."""
+    return {"attempted": False, "ok": None, "sources": [], "error": None, "log": ""}
+
+
+def _pip_install(args: list[str], cwd: str, timeout: int = 300) -> tuple[int, str]:
+    """Run ``python -m pip install <args>`` in ``cwd``; return (rc, output).
+
+    Mirrors ``_git``: never raises (timeout -> 124, missing binary -> 127), always
+    an argument LIST (never shell=True). Isolated so tests monkeypatch it instead
+    of shelling out to real pip. ``--no-input`` keeps pip from ever blocking on a
+    prompt inside the executor thread.
+    """
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-input", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "pip timed out"
+    except OSError as exc:
+        return 127, str(exc)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _pyproject_deps(path: str) -> list[str]:
+    """Return the ``[project.dependencies]`` specifiers from a pyproject.toml.
+
+    Empty list when tomllib is unavailable (Python < 3.11), the file is
+    unparsable, or there is no ``[project] dependencies`` array. Only runtime
+    dependencies are returned — build-system and optional-dependency groups are
+    intentionally ignored.
+    """
+    if tomllib is None:
+        return []
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return []
+    deps = project.get("dependencies")
+    if not isinstance(deps, list):
+        return []
+    return [d for d in deps if isinstance(d, str) and d.strip()]
+
+
+def _install_deps(pack_dir: str, timeout: int = 300) -> dict[str, Any]:
+    """Install a pack's Python dependencies from requirements.txt / pyproject.toml.
+
+    Returns {attempted, ok, sources, error, log}; never raises. requirements.txt
+    and pyproject's ``[project.dependencies]`` are installed in separate pip
+    invocations so one failing source does not mask the other, and ``ok`` is the
+    AND of every attempt. When neither source is present nothing runs and the
+    'not attempted' record is returned.
+    """
+    result = _no_deps()
+    logs: list[str] = []
+    errors: list[str] = []
+    ok = True
+
+    req = os.path.join(pack_dir, "requirements.txt")
+    if os.path.isfile(req):
+        result["attempted"] = True
+        result["sources"].append("requirements.txt")
+        rc, out = _pip_install(["-r", req], pack_dir, timeout)
+        logs.append(out)
+        if rc != 0:
+            ok = False
+            errors.append(f"requirements.txt: pip exited {rc}")
+
+    pyproject = os.path.join(pack_dir, "pyproject.toml")
+    specs = _pyproject_deps(pyproject) if os.path.isfile(pyproject) else []
+    if specs:
+        result["attempted"] = True
+        result["sources"].append("pyproject.toml")
+        # ``--`` stops pip option parsing so a spec beginning with "-" cannot
+        # smuggle a flag (mirrors the _safe_ref argument-injection guard).
+        rc, out = _pip_install(["--", *specs], pack_dir, timeout)
+        logs.append(out)
+        if rc != 0:
+            ok = False
+            errors.append(f"pyproject.toml: pip exited {rc}")
+
+    if result["attempted"]:
+        result["ok"] = ok
+        result["error"] = "; ".join(errors) or None
+        result["log"] = _tail("\n".join(logs), _DEPS_LOG_TAIL)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Synchronous collectors (run off the event loop)
 # ---------------------------------------------------------------------------
 
@@ -748,7 +878,7 @@ def _collect_core(cwd: str) -> dict[str, Any]:
 
 
 def _do_core_pull(cwd: str) -> tuple[int, bool, str]:
-    """git pull --ff-only core; report whether requirements.txt changed."""
+    """git pull --ff-only core; report whether a dependency file changed."""
     rc, before, _ = _git(["rev-parse", "HEAD"], cwd)
     if rc != 0:
         return rc, False, "not a git repo"
@@ -761,7 +891,9 @@ def _do_core_pull(cwd: str) -> tuple[int, bool, str]:
         rc, names, _ = _git(["diff", "--name-only", before.strip(), after.strip()], cwd)
         if rc == 0:
             deps_changed = any(
-                line.strip().endswith("requirements.txt") for line in names.splitlines()
+                os.path.basename(line.strip()) in _DEPS_FILES
+                for line in names.splitlines()
+                if line.strip()
             )
     return 0, deps_changed, ""
 
@@ -772,7 +904,7 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
     Returns (result, "", "") on success, or (None, error, code) on failure
     (code is "fetch_failed" or "checkout_failed"). ``result`` carries the
     before/after sha, the count + capped log of applied commits, the changed
-    file count, and whether requirements.txt changed. The sha range is built
+    file count, and whether a dependency file changed. The sha range is built
     from values git produced — never caller input — so it is safe to interpolate.
     """
     rc, before_out, _ = _git(["rev-parse", "HEAD"], full)
@@ -822,7 +954,9 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
         if rc == 0:
             files = [line for line in names.splitlines() if line.strip()]
             result["changed_files"] = len(files)
-            result["deps_changed"] = any(f.endswith("requirements.txt") for f in files)
+            result["deps_changed"] = any(
+                os.path.basename(f) in _DEPS_FILES for f in files
+            )
     return result, "", ""
 
 
@@ -1004,6 +1138,8 @@ async def registry_install(request: web.Request) -> web.Response:
     result, err, code = await _run(_do_registry_install, download_url, name, root)
     if result is None:
         return _err(err, code, 409 if code == "exists" else 500)
+    # Fresh install: install its Python deps so the node loads on next start.
+    deps = await _run(_install_deps, os.path.join(root, name))
     return web.json_response(
         {
             "ok": True,
@@ -1011,6 +1147,7 @@ async def registry_install(request: web.Request) -> web.Response:
             "version": version or info.get("version"),
             "source": "registry",
             "deps_changed": result["deps_changed"],
+            "deps": deps,
             "restart_required": True,
         }
     )
@@ -1056,7 +1193,11 @@ async def install(request: web.Request) -> web.Response:
         if rc != 0:
             return _err(err.strip() or "checkout failed", "checkout_failed", 500)
 
-    return web.json_response({"ok": True, "name": name, "restart_required": True})
+    # Fresh clone: install its Python deps so the pack loads on next start.
+    deps = await _run(_install_deps, target)
+    return web.json_response(
+        {"ok": True, "name": name, "deps": deps, "restart_required": True}
+    )
 
 
 @PromptServer.instance.routes.post("/touch_manager/update")
@@ -1082,6 +1223,10 @@ async def update(request: web.Request) -> web.Response:
     result, err, code = await _run(_do_pack_update, full, safe_ref)
     if result is None:
         return _err(err, code, 500)
+
+    # Only reinstall when the update actually touched a dependency file — an
+    # unrelated update should not pay for a full pip resolve.
+    result["deps"] = await _run(_install_deps, full) if result["deps_changed"] else _no_deps()
 
     return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
 
@@ -1115,9 +1260,10 @@ async def core(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.post("/touch_manager/core/update")
 async def core_update(request: web.Request) -> web.Response:
-    """git pull the core repo; report whether requirements.txt changed.
+    """git pull the core repo; install its deps when a dependency file changed.
 
-    Does NOT pip-install and does NOT restart — both are user actions.
+    Installs into the running interpreter (see _install_deps) but does NOT
+    restart — the restart stays a user action.
     """
     cwd = _core_dir()
     if not await _run(_is_git, cwd):
@@ -1125,7 +1271,10 @@ async def core_update(request: web.Request) -> web.Response:
     rc, deps_changed, err = await _run(_do_core_pull, cwd)
     if rc != 0:
         return _err(err or "pull failed", "pull_failed", 500)
-    return web.json_response({"ok": True, "deps_changed": deps_changed, "restart_required": True})
+    deps = await _run(_install_deps, cwd) if deps_changed else _no_deps()
+    return web.json_response(
+        {"ok": True, "deps_changed": deps_changed, "deps": deps, "restart_required": True}
+    )
 
 
 @PromptServer.instance.routes.post("/touch_manager/reboot")

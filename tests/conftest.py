@@ -20,6 +20,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 
 class _StubModule(ModuleType):
     def __getattr__(self, attr: str):
@@ -113,3 +115,25 @@ class _NoopRoutes:
 # PromptServer.instance.routes is read at module load; supply a real object so
 # the @decorator calls in touch_manager.py return their wrapped function.
 _server.PromptServer = SimpleNamespace(instance=SimpleNamespace(routes=_NoopRoutes()))
+
+
+@pytest.fixture(autouse=True)
+def stub_pip(monkeypatch):
+    """Never shell out to real pip. Record every install invocation.
+
+    Dependency installation is wired into install/update/core/registry, so a
+    test that lands a requirements.txt would otherwise trigger a real network
+    ``pip install``. This stubs the single isolation point (``_pip_install``) to
+    a success and yields the recorded ``(args, cwd)`` calls so a test can assert
+    what was installed. A test that needs a failure re-patches it locally.
+    """
+    import touch_manager as pack
+
+    calls: list[tuple[list[str], str]] = []
+
+    def _fake(args, cwd, timeout=300):
+        calls.append((list(args), cwd))
+        return 0, "stubbed pip: Successfully installed\n"
+
+    monkeypatch.setattr(pack, "_pip_install", _fake)
+    return calls

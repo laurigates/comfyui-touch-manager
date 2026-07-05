@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.8...comfyui-touch-manager-v0.1.9) (2026-07-05)
+
+
+### Features
+
+* **deps:** install requirements.txt/pyproject.toml after git operations ([#27](https://github.com/laurigates/comfyui-touch-manager/issues/27)) ([c6b0ea7](https://github.com/laurigates/comfyui-touch-manager/commit/c6b0ea7c8755feaac59617e5eddfba70ed0d89b1))
+
 ## [0.1.8](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.7...comfyui-touch-manager-v0.1.8) (2026-07-04)
 
 

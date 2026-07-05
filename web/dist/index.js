@@ -764,8 +764,17 @@ function formatUpdateSummary(r) {
   }
   return parts.join(" · ");
 }
-function formatDepsWarning(r) {
-  return r.deps_changed ? "requirements.txt changed — install Python dependencies manually, then restart." : null;
+function formatDepsResult(deps) {
+  if (!deps?.attempted)
+    return null;
+  const sources = deps.sources.length ? deps.sources.join(", ") : "dependencies";
+  if (deps.ok) {
+    return { level: "info", text: `Installed Python dependencies (${sources}).` };
+  }
+  return {
+    level: "warn",
+    text: `Dependency install failed (${sources})${deps.error ? `: ${deps.error}` : ""} — install them manually before restarting.`
+  };
 }
 function formatCommitLine(entry) {
   return `${entry.sha} ${entry.subject}`.trim();
@@ -1002,6 +1011,12 @@ function button(label, className, onClick) {
 function emptyState(message) {
   return el("div", "tm-empty", message);
 }
+function depsToastDetail(deps) {
+  const d = formatDepsResult(deps);
+  if (!d)
+    return "Restart ComfyUI to apply.";
+  return d.level === "warn" ? d.text : `${d.text} Restart ComfyUI to apply.`;
+}
 function restartBanner(state) {
   const banner = el("div", "tm-restart");
   banner.appendChild(el("div", undefined, "Restart ComfyUI to apply changes."));
@@ -1224,9 +1239,9 @@ function renderUpdateResult(state, result, back) {
   section.appendChild(back);
   section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
   section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
-  const depsWarning = formatDepsWarning(result);
-  if (depsWarning)
-    section.appendChild(el("div", "tm-note tm-note-warn", depsWarning));
+  const deps = formatDepsResult(result.deps);
+  if (deps)
+    section.appendChild(el("div", `tm-note tm-note-${deps.level}`, deps.text));
   if (result.commit_log.length > 0) {
     section.appendChild(el("div", "tm-field-label", "Applied commits"));
     const list = el("div", "tm-list");
@@ -1538,7 +1553,8 @@ async function doInstall(state, url, ref) {
     const res = await apiPost("install", body);
     markRestartPending(state);
     state.updates = null;
-    toast("success", `Installed ${res.name}`, "Restart ComfyUI to apply.");
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(level, `Installed ${res.name}`, depsToastDetail(res.deps));
     await renderInstalledTab(state);
   } catch (e) {
     const err = e;
@@ -1549,7 +1565,7 @@ async function doInstall(state, url, ref) {
 }
 async function renderRegistryTab(state) {
   const section = resetBody(state);
-  section.appendChild(el("div", "tm-note tm-note-info", "Search the Comfy Registry and install a node. Python dependencies are " + "NOT installed automatically — install them and restart afterwards."));
+  section.appendChild(el("div", "tm-note tm-note-info", "Search the Comfy Registry and install a node. Python dependencies are " + "installed automatically; a restart is required afterwards."));
   section.appendChild(el("div", "tm-field-label", "Search the registry"));
   const input = el("input", "tm-input");
   input.type = "search";
@@ -1677,8 +1693,8 @@ async function doRegistryInstall(state, node, version) {
     const res = await apiPost("registry/install", body);
     markRestartPending(state);
     state.updates = null;
-    const detail = res.deps_changed ? "Python dependencies changed — install them, then restart." : "Restart ComfyUI to apply.";
-    toast("success", `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, detail);
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(level, `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, depsToastDetail(res.deps));
     state.shell.setBusy(false);
     await renderInstalledTab(state);
   } catch (e) {
@@ -1722,7 +1738,7 @@ async function renderCoreTab(state) {
     actions.appendChild(button("Restart ComfyUI", "tm-btn-danger", () => void doReboot(state)));
   }
   section.appendChild(actions);
-  section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo. Does not install Python dependencies or restart — do those yourself after."));
+  section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo and installs any changed Python dependencies. Restart ComfyUI yourself afterwards."));
 }
 async function doReboot(state) {
   const ok = await confirmAction(state, "Restart ComfyUI?", "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.", { confirmLabel: "Restart now", danger: true });
@@ -1742,15 +1758,15 @@ async function doReboot(state) {
   }
 }
 async function doCoreUpdate(state) {
-  const ok = await confirmAction(state, "Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.", { confirmLabel: "Update core" });
+  const ok = await confirmAction(state, "Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.", { confirmLabel: "Update core" });
   if (!ok)
     return;
   state.shell.setBusy(true);
   try {
     const res = await apiPost("core/update", {});
     markRestartPending(state);
-    const detail = res.deps_changed ? "requirements.txt changed — reinstall deps, then restart." : "Restart ComfyUI to apply.";
-    toast("success", "Core updated", detail);
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(level, "Core updated", depsToastDetail(res.deps));
     await renderCoreTab(state);
   } catch (e) {
     const err = e;

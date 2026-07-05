@@ -23,16 +23,19 @@ import {
 import { app } from "/scripts/app.js";
 import {
   type CoreInfo,
+  type CoreUpdateResult,
+  type DepsResult,
   filterPacks,
   formatCommitLine,
   formatCoreBehind,
-  formatDepsWarning,
+  formatDepsResult,
   formatProgress,
   formatRef,
   formatRegistryMeta,
   formatUpdateStatus,
   formatUpdateSummary,
   type InstalledPack,
+  type InstallResult,
   iconForKind,
   installPermitted,
   type ManagerConfig,
@@ -275,6 +278,17 @@ function button(label: string, className: string, onClick: () => void): HTMLButt
 
 function emptyState(message: string): HTMLElement {
   return el("div", "tm-empty", message);
+}
+
+/**
+ * The toast detail line after an operation that may have installed dependencies.
+ * A successful (or no-op) install collapses to the plain restart hint; a failed
+ * install surfaces its message so the operator fixes it before restarting.
+ */
+function depsToastDetail(deps: DepsResult | null | undefined): string {
+  const d = formatDepsResult(deps);
+  if (!d) return "Restart ComfyUI to apply.";
+  return d.level === "warn" ? d.text : `${d.text} Restart ComfyUI to apply.`;
 }
 
 /**
@@ -605,8 +619,8 @@ function renderUpdateResult(
   section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
   section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
 
-  const depsWarning = formatDepsWarning(result);
-  if (depsWarning) section.appendChild(el("div", "tm-note tm-note-warn", depsWarning));
+  const deps = formatDepsResult(result.deps);
+  if (deps) section.appendChild(el("div", `tm-note tm-note-${deps.level}`, deps.text));
 
   if (result.commit_log.length > 0) {
     section.appendChild(el("div", "tm-field-label", "Applied commits"));
@@ -1076,10 +1090,11 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
   try {
     const body: Record<string, unknown> = { url: url.trim() };
     if (ref.trim()) body.ref = ref.trim();
-    const res = await apiPost<{ name: string }>("install", body);
+    const res = await apiPost<InstallResult>("install", body);
     markRestartPending(state);
     state.updates = null;
-    toast("success", `Installed ${res.name}`, "Restart ComfyUI to apply.");
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(level, `Installed ${res.name}`, depsToastDetail(res.deps));
     // Refresh installed list and switch to it.
     await renderInstalledTab(state);
   } catch (e) {
@@ -1101,7 +1116,7 @@ async function renderRegistryTab(state: ManagerState): Promise<void> {
       "div",
       "tm-note tm-note-info",
       "Search the Comfy Registry and install a node. Python dependencies are " +
-        "NOT installed automatically — install them and restart afterwards.",
+        "installed automatically; a restart is required afterwards.",
     ),
   );
 
@@ -1288,10 +1303,12 @@ async function doRegistryInstall(
     const res = await apiPost<RegistryInstallResult>("registry/install", body);
     markRestartPending(state);
     state.updates = null;
-    const detail = res.deps_changed
-      ? "Python dependencies changed — install them, then restart."
-      : "Restart ComfyUI to apply.";
-    toast("success", `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, detail);
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(
+      level,
+      `Installed ${res.name}${res.version ? `@${res.version}` : ""}`,
+      depsToastDetail(res.deps),
+    );
     state.shell.setBusy(false);
     await renderInstalledTab(state);
   } catch (e) {
@@ -1354,7 +1371,7 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
     el(
       "div",
       "tm-note tm-note-info",
-      "Runs git pull on the core repo. Does not install Python dependencies or restart — do those yourself after.",
+      "Runs git pull on the core repo and installs any changed Python dependencies. Restart ComfyUI yourself afterwards.",
     ),
   );
 }
@@ -1400,18 +1417,16 @@ async function doCoreUpdate(state: ManagerState): Promise<void> {
   const ok = await confirmAction(
     state,
     "Update ComfyUI core?",
-    "Run git pull on the core repo? Python dependencies are NOT installed automatically and a manual restart is required.",
+    "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.",
     { confirmLabel: "Update core" },
   );
   if (!ok) return;
   state.shell.setBusy(true);
   try {
-    const res = await apiPost<{ deps_changed: boolean }>("core/update", {});
+    const res = await apiPost<CoreUpdateResult>("core/update", {});
     markRestartPending(state);
-    const detail = res.deps_changed
-      ? "requirements.txt changed — reinstall deps, then restart."
-      : "Restart ComfyUI to apply.";
-    toast("success", "Core updated", detail);
+    const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
+    toast(level, "Core updated", depsToastDetail(res.deps));
     await renderCoreTab(state);
   } catch (e) {
     const err = e as ManagerError;

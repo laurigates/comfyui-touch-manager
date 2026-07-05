@@ -110,6 +110,13 @@ describe("openManager (jsdom modal smoke)", () => {
       ],
       changed_files: 3,
       deps_changed: true,
+      deps: {
+        attempted: true,
+        ok: true,
+        sources: ["requirements.txt"],
+        error: null,
+        log: "Successfully installed numpy",
+      },
       truncated: false,
     };
     openManager();
@@ -127,7 +134,7 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
     expect(document.body.textContent).toContain("feat: add thing");
     expect(document.body.textContent).toContain("fix: bug");
-    // deps_changed surfaces the dependency warning.
+    // A dependency install surfaces a note naming the installed source.
     expect(document.body.textContent).toMatch(/requirements\.txt/);
   });
 

@@ -6,7 +6,7 @@ import {
   filterPacks,
   formatCommitLine,
   formatCoreBehind,
-  formatDepsWarning,
+  formatDepsResult,
   formatDownloads,
   formatProgress,
   formatRef,
@@ -190,6 +190,7 @@ describe("update-result formatting", () => {
     commit_log: [],
     changed_files: 5,
     deps_changed: false,
+    deps: { attempted: false, ok: null, sources: [], error: null, log: "" },
     truncated: false,
     ...over,
   });
@@ -214,9 +215,39 @@ describe("update-result formatting", () => {
     );
   });
 
-  it("surfaces a deps warning only when requirements.txt changed", () => {
-    expect(formatDepsWarning(result({ deps_changed: false }))).toBeNull();
-    expect(formatDepsWarning(result({ deps_changed: true }))).toMatch(/requirements\.txt/);
+  it("returns null for a deps record that never ran pip", () => {
+    expect(formatDepsResult(null)).toBeNull();
+    expect(formatDepsResult(undefined)).toBeNull();
+    expect(
+      formatDepsResult({ attempted: false, ok: null, sources: [], error: null, log: "" }),
+    ).toBeNull();
+  });
+
+  it("reports a successful install as an info note naming the sources", () => {
+    const note = formatDepsResult({
+      attempted: true,
+      ok: true,
+      sources: ["requirements.txt", "pyproject.toml"],
+      error: null,
+      log: "",
+    });
+    expect(note).toEqual({
+      level: "info",
+      text: "Installed Python dependencies (requirements.txt, pyproject.toml).",
+    });
+  });
+
+  it("reports a failed install as a warn note carrying the error", () => {
+    const note = formatDepsResult({
+      attempted: true,
+      ok: false,
+      sources: ["requirements.txt"],
+      error: "requirements.txt: pip exited 1",
+      log: "…",
+    });
+    expect(note?.level).toBe("warn");
+    expect(note?.text).toMatch(/pip exited 1/);
+    expect(note?.text).toMatch(/install them manually/);
   });
 
   it("formats a commit line as '<short> <subject>'", () => {

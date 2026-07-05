@@ -50,6 +50,19 @@ export interface CommitLogEntry {
   subject: string;
 }
 
+/**
+ * The result of a backend pip dependency install, attached by every route that
+ * lands new code (install, update, core/update, registry/install). `attempted`
+ * is false — and `ok` null — when the operation touched no dependency file.
+ */
+export interface DepsResult {
+  attempted: boolean;
+  ok: boolean | null;
+  sources: string[];
+  error: string | null;
+  log: string;
+}
+
 /** The change detail returned by POST /touch_manager/update. */
 export interface UpdateResult {
   name: string;
@@ -59,7 +72,20 @@ export interface UpdateResult {
   commit_log: CommitLogEntry[];
   changed_files: number;
   deps_changed: boolean;
+  deps: DepsResult;
   truncated: boolean;
+}
+
+/** POST /touch_manager/install (git clone). */
+export interface InstallResult {
+  name: string;
+  deps: DepsResult;
+}
+
+/** POST /touch_manager/core/update. */
+export interface CoreUpdateResult {
+  deps_changed: boolean;
+  deps: DepsResult;
 }
 
 /** One row of GET /touch_manager/updates/list. */
@@ -148,6 +174,7 @@ export interface RegistryInstallResult {
   version: string | null;
   source: "registry";
   deps_changed: boolean;
+  deps: DepsResult;
 }
 
 /** A unified version-picker entry — either a git ref or a registry version. */
@@ -421,11 +448,26 @@ export function formatUpdateSummary(r: UpdateResult): string {
   return parts.join(" · ");
 }
 
-/** Warning string when an update changed requirements.txt, else null. */
-export function formatDepsWarning(r: UpdateResult): string | null {
-  return r.deps_changed
-    ? "requirements.txt changed — install Python dependencies manually, then restart."
-    : null;
+/**
+ * Human summary of a backend dependency-install attempt, or null when nothing
+ * ran (no dependency file was touched). `level` picks the note styling: an
+ * `info` note when pip succeeded, a `warn` note when it failed so the operator
+ * knows to install manually before restarting.
+ */
+export function formatDepsResult(
+  deps: DepsResult | null | undefined,
+): { level: "info" | "warn"; text: string } | null {
+  if (!deps?.attempted) return null;
+  const sources = deps.sources.length ? deps.sources.join(", ") : "dependencies";
+  if (deps.ok) {
+    return { level: "info", text: `Installed Python dependencies (${sources}).` };
+  }
+  return {
+    level: "warn",
+    text: `Dependency install failed (${sources})${
+      deps.error ? `: ${deps.error}` : ""
+    } — install them manually before restarting.`,
+  };
 }
 
 /** Compact "<short> <subject>" line for a single applied commit. */

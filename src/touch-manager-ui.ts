@@ -26,7 +26,6 @@ import {
   type CoreUpdateResult,
   type DepsResult,
   filterPacks,
-  formatCommitLine,
   formatCoreBehind,
   formatDepsResult,
   formatProgress,
@@ -315,7 +314,7 @@ type TabId = "installed" | "updates" | "install" | "registry" | "core";
 
 /**
  * Cached result of an Updates-tab "Check for updates" sweep. Holding this in
- * state means revisiting the tab — or returning after updating ONE pack —
+ * state means revisiting the tab — or updating ONE pack from the list —
  * doesn't re-fetch every git remote again. `checkedAt` drives a "last checked"
  * label; `complete` distinguishes an in-progress sweep from a finished one.
  */
@@ -336,7 +335,7 @@ interface ManagerState {
   updates: UpdatesCache | null;
   /** Per-tab filter text, so switching tabs doesn't leak one query into another. */
   search: { installed: string; updates: string };
-  /** Saved Updates-list scroll offset, restored on back-navigation / re-entry. */
+  /** Saved Updates-list scroll offset, restored on tab re-entry. */
   updatesScroll: number;
 }
 
@@ -473,6 +472,10 @@ function syncSearch(state: ManagerState): void {
 
 function markRestartPending(state: ManagerState): void {
   state.restartPending = true;
+  // In-place list repaints (post-update) never pass through resetBody —
+  // surface the banner immediately instead of on the next full tab render.
+  const body = state.shell.bodyEl;
+  if (!body.querySelector(".tm-restart")) body.prepend(restartBanner(state));
 }
 
 // ============================================================
@@ -537,7 +540,11 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   const actions = el("div", "tm-row-actions");
   const gitDisabledReason = pack.is_git ? "" : "not a git repo";
 
-  const updateBtn = button("Update", "", () => void doUpdate(state, pack.name));
+  const updateBtn = button(
+    "Update",
+    "",
+    () => void doUpdate(state, pack.name, { origin: "installed" }),
+  );
   updateBtn.disabled = !pack.is_git;
   if (gitDisabledReason) updateBtn.title = gitDisabledReason;
   actions.appendChild(updateBtn);
@@ -560,7 +567,7 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
 interface UpdateOptions {
   /** Branch / tag to check out instead of fast-forwarding the tracked branch. */
   ref?: string;
-  /** Which tab the action came from — drives the "Back" target after success. */
+  /** Which list the action came from — picks what to repaint in place. */
   origin?: TabId;
 }
 
@@ -570,14 +577,24 @@ function removeFromUpdatesCache(state: ManagerState, name: string): void {
   state.updates.results = state.updates.results.filter((r) => r.name !== name);
 }
 
-/** The Back affordance shown on the post-update panel, per origin tab. */
-function updateResultBack(state: ManagerState, origin: TabId | undefined): HTMLButtonElement {
-  if (origin === "updates") {
-    // Return to the Updates list (cached, filtered, scroll restored) rather than
-    // re-checking every remote again.
-    return button("← Back to updates", "", () => void renderUpdatesTab(state));
+/**
+ * Re-fetch the installed packs and repaint the list in place — no loading
+ * placeholder, scroll preserved — so a row action refreshes the row it acted
+ * on (new ref/sha) without yanking the user out of the list.
+ */
+async function refreshInstalledList(state: ManagerState): Promise<void> {
+  const top = state.shell.bodyEl.scrollTop;
+  try {
+    const data = await apiGet<{ packs: InstalledPack[] }>("installed");
+    state.installed = data.packs ?? [];
+  } catch {
+    return; // keep the current (stale) list; the next tab entry re-fetches
   }
-  return button("← Back to installed", "", () => void renderInstalledTab(state));
+  if (state.activeTab !== "installed") return;
+  renderInstalledList(state);
+  requestAnimationFrame(() => {
+    state.shell.bodyEl.scrollTop = top;
+  });
 }
 
 async function doUpdate(
@@ -585,9 +602,6 @@ async function doUpdate(
   name: string,
   opts: UpdateOptions = {},
 ): Promise<void> {
-  // Coming from the Updates list: remember the scroll offset so Back lands in
-  // the same place.
-  if (opts.origin === "updates") state.updatesScroll = state.shell.bodyEl.scrollTop;
   state.shell.setBusy(true);
   try {
     const result = await apiPost<UpdateResult>(
@@ -598,38 +612,26 @@ async function doUpdate(
     // The pack is now at its target — keep the cached sweep honest so it does
     // not keep advertising an update for a pack we just updated.
     removeFromUpdatesCache(state, name);
-    toast("success", `Updated ${name}`, formatUpdateSummary(result));
-    state.shell.setBusy(false);
-    renderUpdateResult(state, { ...result, name }, updateResultBack(state, opts.origin));
+    const deps = formatDepsResult(result.deps);
+    toast(
+      deps?.level === "warn" ? "warn" : "success",
+      `Updated ${name}`,
+      deps ? `${formatUpdateSummary(result)} — ${deps.text}` : formatUpdateSummary(result),
+    );
+    // Stay in the list the action came from: repaint it in place (the row
+    // drops off Updates / refreshes on Installed) instead of navigating to a
+    // separate result panel. A Versions checkout has no origin — the picker
+    // stays open for further checkouts.
+    if (opts.origin === "updates") {
+      repaintUpdatesList(state);
+    } else if (opts.origin === "installed") {
+      await refreshInstalledList(state);
+    }
   } catch (e) {
     const err = e as ManagerError;
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
     state.shell.setBusy(false);
-  }
-}
-
-/** A panel summarising exactly what an update applied (SHAs, commits, files). */
-function renderUpdateResult(
-  state: ManagerState,
-  result: UpdateResult,
-  back: HTMLButtonElement,
-): void {
-  const section = resetBody(state);
-  section.appendChild(back);
-  section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
-  section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
-
-  const deps = formatDepsResult(result.deps);
-  if (deps) section.appendChild(el("div", `tm-note tm-note-${deps.level}`, deps.text));
-
-  if (result.commit_log.length > 0) {
-    section.appendChild(el("div", "tm-field-label", "Applied commits"));
-    const list = el("div", "tm-list");
-    for (const entry of result.commit_log) {
-      list.appendChild(el("div", "tm-row-meta", formatCommitLine(entry)));
-    }
-    if (result.truncated) list.appendChild(el("div", "tm-row-meta", "…older commits omitted"));
-    section.appendChild(list);
   }
 }
 
@@ -741,10 +743,11 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
 // ============================================================
 // Updates tab
 //
-// A "Check for updates" sweep is CACHED on the state. Revisiting the tab — or
-// returning after updating a single pack — repaints the cached results instead
-// of re-fetching every git remote. The list is filterable (shared search box)
-// and its scroll offset is restored on back-navigation.
+// A "Check for updates" sweep is CACHED on the state. Revisiting the tab
+// repaints the cached results instead of re-fetching every git remote, and
+// updating a pack repaints the list in place (the row simply drops off). The
+// list is filterable (shared search box) and its scroll offset is restored on
+// tab re-entry.
 // ============================================================
 
 /** Short "Last checked HH:MM" label from a cache timestamp. */

@@ -45,7 +45,7 @@ export interface UpdateInfo {
 }
 
 /** One applied commit in an UpdateResult log. */
-export interface CommitLogEntry {
+interface CommitLogEntry {
   sha: string;
   subject: string;
 }
@@ -468,11 +468,6 @@ export function formatDepsResult(
       deps.error ? `: ${deps.error}` : ""
     } — install them manually before restarting.`,
   };
-}
-
-/** Compact "<short> <subject>" line for a single applied commit. */
-export function formatCommitLine(entry: CommitLogEntry): string {
-  return `${entry.sha} ${entry.subject}`.trim();
 }
 
 /** Format core-repo behind counts ({origin, upstream}) into a label. */

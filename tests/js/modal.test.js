@@ -97,7 +97,7 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
   });
 
-  it("renders an update result panel with the commit log after an update", async () => {
+  it("stays on the Installed list after an update — refreshed in place, no result panel", async () => {
     __responses["/touch_manager/update"] = {
       ok: true,
       name: "comfyui-touch-resize",
@@ -123,18 +123,28 @@ describe("openManager (jsdom modal smoke)", () => {
     await flush();
     await flush();
 
+    const installedFetches = () =>
+      __fetchCalls.filter((u) => u.includes("/touch_manager/installed")).length;
+    const fetchesBefore = installedFetches();
+
     // Update the pack from its Installed row.
     const updateBtn = [...document.querySelectorAll("button")].find(
       (b) => b.textContent === "Update",
     );
     updateBtn?.click();
-    await flush();
-    await flush();
+    for (let i = 0; i < 4; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
-    expect(document.body.textContent).toContain("feat: add thing");
-    expect(document.body.textContent).toContain("fix: bug");
-    // A dependency install surfaces a note naming the installed source.
+    // No transition: still the Installed list (row + Update button present),
+    // re-fetched in place so the row shows the new ref — no back affordance.
+    expect(installedFetches()).toBe(fetchesBefore + 1);
+    const buttons = [...document.querySelectorAll("button")];
+    expect(buttons.some((b) => b.textContent === "Update")).toBe(true);
+    expect(buttons.some((b) => b.textContent?.startsWith("← Back"))).toBe(false);
+    expect(document.body.textContent).not.toContain("Applied commits");
+    // The restart notice surfaces in place, and the toast carries the update
+    // summary plus the dependency-install source.
+    expect(document.body.textContent).toContain("Restart ComfyUI to apply");
     expect(document.body.textContent).toMatch(/requirements\.txt/);
   });
 
@@ -384,7 +394,7 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(list.textContent).not.toContain("pack-beta");
   });
 
-  it("updating from the Updates list drops the pack and returns to the cached list", async () => {
+  it("updating from the Updates list drops the pack in place — no result panel", async () => {
     seedTwoUpdates();
     __responses["/touch_manager/update"] = {
       ok: true,
@@ -409,22 +419,21 @@ describe("openManager (jsdom modal smoke)", () => {
     for (let i = 0; i < 4; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
-    // The result panel offers a Back-to-updates affordance, not back-to-installed.
-    const back = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent === "← Back to updates",
-    );
-    expect(back).toBeTruthy();
+    // No transition: the cached list repaints in place — no Back affordance,
+    // the updated pack's row is gone, the rest stay.
+    expect(
+      [...document.querySelectorAll("button")].some((b) => b.textContent?.startsWith("← Back")),
+    ).toBe(false);
+    const list2 = document.querySelector(".tm-updates-list");
+    expect(list2.textContent).not.toContain("pack-alpha");
+    expect(list2.textContent).toContain("pack-beta");
 
-    back?.click();
-    for (let i = 0; i < 4; i++) await flush();
-
-    // Back in the cached list: no fresh sweep, and the updated pack is gone.
+    // And no fresh sweep — the cached results were reused.
     const checksAfter = __fetchCalls.filter((u) =>
       u.includes("/touch_manager/updates/check"),
     ).length;
     expect(checksAfter).toBe(checksBefore);
-    const list2 = document.querySelector(".tm-updates-list");
-    expect(list2.textContent).not.toContain("pack-alpha");
-    expect(list2.textContent).toContain("pack-beta");
+    // The restart notice surfaces without leaving the list.
+    expect(document.body.textContent).toContain("Restart ComfyUI to apply");
   });
 });

@@ -85,12 +85,12 @@ describe("openManager (jsdom modal smoke)", () => {
     restartBtn?.click();
     await flush();
 
-    // The confirmation is drawn IN-MODAL (not via ComfyUI's PrimeVue dialog,
-    // which renders behind our z-index-9999 shell). Confirm it appears on top
-    // and click its OK button.
-    const overlay = document.querySelector(".tm-confirm-overlay");
+    // The confirmation is drawn IN-MODAL via the kit's confirmInShell (not
+    // ComfyUI's PrimeVue dialog, which renders behind our z-index-9999 shell).
+    // Confirm it appears on top and click its confirm button (danger variant).
+    const overlay = document.querySelector(".cmp-ov-backdrop");
     expect(overlay).toBeTruthy();
-    overlay.querySelector(".tm-confirm-ok").click();
+    overlay.querySelector(".cmp-ov-danger").click();
     await flush();
     await flush();
 
@@ -241,7 +241,7 @@ describe("openManager (jsdom modal smoke)", () => {
     // Install the registry version — then confirm via the in-modal overlay.
     [...document.querySelectorAll("button")].find((b) => b.textContent === "Install")?.click();
     await flush();
-    document.querySelector(".tm-confirm-overlay .tm-confirm-ok").click();
+    document.querySelector(".cmp-ov-backdrop .cmp-ov-primary").click();
     for (let i = 0; i < 4; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/registry/install"))).toBe(true);
@@ -296,16 +296,16 @@ describe("openManager (jsdom modal smoke)", () => {
       ?.click();
     await flush();
 
-    const overlay = document.querySelector(".tm-confirm-overlay");
+    const overlay = document.querySelector(".cmp-ov-backdrop");
     expect(overlay).toBeTruthy();
     // The confirm is mounted inside the shell dialog (z-index 9999), not via the
     // PrimeVue dialog that would render behind it.
     expect(document.querySelector(".cmp-dialog")?.contains(overlay)).toBe(true);
 
-    overlay.querySelector(".tm-confirm-cancel").click();
+    [...overlay.querySelectorAll("button")].find((b) => b.textContent === "Cancel").click();
     await flush();
 
-    expect(document.querySelector(".tm-confirm-overlay")).toBeFalsy();
+    expect(document.querySelector(".cmp-ov-backdrop")).toBeFalsy();
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(false);
   });
 

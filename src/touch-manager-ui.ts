@@ -15,6 +15,8 @@
 // All DOM lives here; the pure helpers (URL validation mirror, version-label
 // formatting, fuzzy glue) come from manager-core.ts.
 import {
+  confirmInShell,
+  ensureStyleOnce,
   highlightMatches,
   type ModalShellController,
   notify,
@@ -121,75 +123,10 @@ function toast(
   }
 }
 
-interface ConfirmOptions {
-  confirmLabel?: string;
-  danger?: boolean;
-}
-
-/**
- * Touch-first confirmation rendered INSIDE the modal shell.
- *
- * We deliberately do NOT use ComfyUI's `extensionManager.dialog.confirm`: that
- * PrimeVue dialog mounts at a z-index (~1100) far below this pack's modal shell
- * (the kit's backdrop/dialog sit at 9998/9999), so it appears *behind* our
- * opaque backdrop — invisible and unclickable. That is the "Restart now does
- * nothing" bug. Drawing the confirmation as an absolutely-positioned overlay
- * within `shell.dialog` keeps it on top and on-screen on mobile.
- */
-function confirmAction(
-  state: ManagerState,
-  title: string,
-  message: string,
-  opts: ConfirmOptions = {},
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const overlay = el("div", "tm-confirm-overlay");
-    const box = el("div", "tm-confirm-box");
-    box.appendChild(el("div", "tm-confirm-title", title));
-    box.appendChild(el("div", "tm-confirm-msg", message));
-
-    const actions = el("div", "tm-confirm-actions");
-    let settled = false;
-    const finish = (result: boolean): void => {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener("keydown", onKey, true);
-      overlay.remove();
-      resolve(result);
-    };
-    // Beat the shell's document-level capture Esc handler (which would close
-    // the whole modal) by listening on window in the capture phase.
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        finish(false);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        finish(true);
-      }
-    };
-
-    const cancel = button("Cancel", "tm-confirm-cancel", () => finish(false));
-    const ok = button(
-      opts.confirmLabel ?? "Confirm",
-      `tm-confirm-ok ${opts.danger ? "tm-btn-danger" : "tm-btn-primary"}`,
-      () => finish(true),
-    );
-    actions.append(cancel, ok);
-    box.appendChild(actions);
-    overlay.appendChild(box);
-    // Dismiss on backdrop tap (but not when tapping the box itself).
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) finish(false);
-    });
-
-    state.shell.dialog.appendChild(overlay);
-    window.addEventListener("keydown", onKey, true);
-    requestAnimationFrame(() => ok.focus());
-  });
-}
+// Confirmations render via the kit's confirmInShell — an overlay INSIDE
+// shell.dialog. Do NOT use ComfyUI's `extensionManager.dialog.confirm` here:
+// that PrimeVue dialog mounts at z-index ~1100, far below the kit's 9998/9999
+// backdrop — invisible and unclickable (the "Restart now does nothing" bug).
 
 // ============================================================
 // Small DOM builders
@@ -197,13 +134,9 @@ function confirmAction(
 
 const STYLE_ID = "touch-manager-style";
 
-function ensureStyle(): void {
-  if (document.getElementById(STYLE_ID)) return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  // Big tap targets, 16px inputs (avoid iOS zoom), momentum scroll. Scoped
-  // under .tm-* so it cannot collide with the kit's .cmp-* shell styles.
-  s.textContent = `
+// Big tap targets, 16px inputs (avoid iOS zoom), momentum scroll. Scoped
+// under .tm-* so it cannot collide with the kit's .cmp-* shell styles.
+const CSS = `
 .tm-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 44px; padding: 10px 12px;
   font-size: 15px; border-radius: 8px; border: 1px solid var(--border-color, #444);
@@ -240,22 +173,8 @@ function ensureStyle(): void {
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
 .tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tm-updates-head .tm-row-meta { margin-left: auto; }
-/* In-modal confirmation. The shell sits at z-index 9999; ComfyUI's own
-   PrimeVue confirm dialog renders BELOW it (≈1100) and is invisible behind
-   our backdrop — so we draw our own overlay inside the dialog instead. */
-.tm-confirm-overlay { position: absolute; inset: 0; z-index: 5; display: flex;
-  align-items: center; justify-content: center; padding: 16px;
-  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
-.tm-confirm-box { width: min(460px, 100%); display: flex; flex-direction: column; gap: 12px;
-  padding: 18px; border-radius: 12px; background: var(--comfy-menu-bg, #1e1e1e);
-  border: 1px solid var(--border-color, #444); box-shadow: 0 16px 48px rgba(0,0,0,0.7); }
-.tm-confirm-title { font-size: 17px; font-weight: 700; }
-.tm-confirm-msg { font-size: 14px; line-height: 1.45; opacity: 0.9; word-break: break-word; }
-.tm-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .cmp-match { text-decoration: underline; }
 `;
-  document.head.appendChild(s);
-}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -342,7 +261,7 @@ interface ManagerState {
 /** Open the Touch Node Manager modal. Safe to call repeatedly. */
 export function openManager(): void {
   try {
-    ensureStyle();
+    ensureStyleOnce(STYLE_ID, CSS);
   } catch (e) {
     console.warn(`[${EXT_NAME}] style injection failed`, e);
   }
@@ -636,12 +555,13 @@ async function doUpdate(
 }
 
 async function doUninstall(state: ManagerState, name: string): Promise<void> {
-  const ok = await confirmAction(
-    state,
-    "Disable pack?",
-    `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
-    { confirmLabel: "Disable", danger: true },
-  );
+  const ok = await confirmInShell(state.shell, {
+    title: "Disable pack?",
+    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
+    confirmLabel: "Disable",
+    danger: true,
+    enterConfirms: true,
+  });
   if (!ok) return;
   state.shell.setBusy(true);
   try {
@@ -1081,12 +1001,12 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
     toast("warn", "Invalid URL", urlValidationHint(v.reason));
     return;
   }
-  const ok = await confirmAction(
-    state,
-    "Install pack?",
-    `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`,
-    { confirmLabel: "Install" },
-  );
+  const ok = await confirmInShell(state.shell, {
+    title: "Install pack?",
+    message: `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`,
+    confirmLabel: "Install",
+    enterConfirms: true,
+  });
   if (!ok) return;
 
   state.shell.setBusy(true);
@@ -1290,13 +1210,14 @@ async function doRegistryInstall(
   version: string | null,
 ): Promise<void> {
   const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
-  const ok = await confirmAction(
-    state,
-    "Install from registry?",
-    `Download and install ${label} from the Comfy Registry into custom_nodes? ` +
+  const ok = await confirmInShell(state.shell, {
+    title: "Install from registry?",
+    message:
+      `Download and install ${label} from the Comfy Registry into custom_nodes? ` +
       "Only install code you trust. A restart is required.",
-    { confirmLabel: "Install" },
-  );
+    confirmLabel: "Install",
+    enterConfirms: true,
+  });
   if (!ok) return;
 
   state.shell.setBusy(true);
@@ -1387,12 +1308,14 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
  * surface instead.
  */
 async function doReboot(state: ManagerState): Promise<void> {
-  const ok = await confirmAction(
-    state,
-    "Restart ComfyUI?",
-    "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
-    { confirmLabel: "Restart now", danger: true },
-  );
+  const ok = await confirmInShell(state.shell, {
+    title: "Restart ComfyUI?",
+    message:
+      "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+    confirmLabel: "Restart now",
+    danger: true,
+    enterConfirms: true,
+  });
   if (!ok) return;
   toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
   const section = resetBody(state);
@@ -1417,12 +1340,13 @@ async function doReboot(state: ManagerState): Promise<void> {
 }
 
 async function doCoreUpdate(state: ManagerState): Promise<void> {
-  const ok = await confirmAction(
-    state,
-    "Update ComfyUI core?",
-    "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.",
-    { confirmLabel: "Update core" },
-  );
+  const ok = await confirmInShell(state.shell, {
+    title: "Update ComfyUI core?",
+    message:
+      "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.",
+    confirmLabel: "Update core",
+    enterConfirms: true,
+  });
   if (!ok) return;
   state.shell.setBusy(true);
   try {

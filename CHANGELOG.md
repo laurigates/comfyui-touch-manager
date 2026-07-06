@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.9...comfyui-touch-manager-v0.1.10) (2026-07-06)
+
+
+### Features
+
+* **updates:** stay in the same list view after updating a pack ([#30](https://github.com/laurigates/comfyui-touch-manager/issues/30)) ([c912ccc](https://github.com/laurigates/comfyui-touch-manager/commit/c912ccc7ee7b588cc814ac5487e1f0f42ee784e1))
+
 ## [0.1.9](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.8...comfyui-touch-manager-v0.1.9) (2026-07-05)
 
 

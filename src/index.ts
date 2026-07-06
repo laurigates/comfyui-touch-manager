@@ -13,34 +13,27 @@
 //
 // The shared modal primitives come from @laurigates/comfy-modal-kit and are
 // INLINED by `bun build` — not copied into this pack.
-import { notify } from "@laurigates/comfy-modal-kit";
+import { makeLauncher } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import { openManager } from "./touch-manager-ui";
 
 const EXT_NAME = "comfyui-touch-manager";
-const OPEN_COMMAND_ID = "TouchManager.Open";
 
-// Open the manager defensively — never let a failure bubble into ComfyUI's
-// command/menu/button dispatch.
-function safeOpen(): void {
-  try {
-    openManager();
-  } catch (e) {
-    console.error(`[${EXT_NAME}] failed to open node manager`, e);
-    // Surface the tapped-action failure via a copyable popup, not just the
-    // devtools trail (comfyui-error-popups-copyable.md). Guard notify() itself
-    // so a rendering failure can't bubble past this defensive boundary.
-    try {
-      notify({
-        severity: "error",
-        summary: "Could not open Touch Node Manager",
-        detail: String(e),
-      });
-    } catch (notifyErr) {
-      console.warn(`[${EXT_NAME}] notify failed`, notifyErr);
-    }
-  }
-}
+// Command + shared Extensions > Touch Tools menu entry + action-bar button,
+// built by the kit with the family conventions baked in (kebab command id,
+// PrimeIcons, safe-open with a copyable error toast). Kit ADR-0002.
+// NOTE: the command id changed from "TouchManager.Open" to
+// "touch-manager.open" — user keybindings on the old id need re-binding.
+const launcher = makeLauncher({
+  id: "touch-manager.open",
+  label: "Touch Node Manager",
+  icon: "pi pi-th-large",
+  failSummary: "Could not open Touch Node Manager",
+  open: openManager,
+});
+// The launcher's command function IS the guarded opener; reuse it for the
+// sidebar tab below so every entry point shares the same defensive boundary.
+const safeOpen = launcher.commands[0]?.function ?? openManager;
 
 app.registerExtension({
   name: "comfy.touch-manager",
@@ -60,32 +53,7 @@ app.registerExtension({
     // here, so cast the array at the registration boundary.
   ] as unknown as Parameters<typeof app.registerExtension>[0]["settings"],
 
-  // A command so the manager is reachable from the command palette and menu.
-  commands: [
-    {
-      id: OPEN_COMMAND_ID,
-      label: "Touch Node Manager",
-      icon: "pi pi-th-large",
-      function: () => safeOpen(),
-    },
-  ],
-
-  // Surface the command under the Extensions menu group.
-  menuCommands: [
-    {
-      path: ["Extensions"],
-      commands: [OPEN_COMMAND_ID],
-    },
-  ],
-
-  // A top action-bar button — the primary touch entry point.
-  actionBarButtons: [
-    {
-      icon: "pi pi-th-large",
-      tooltip: "Touch Node Manager",
-      onClick: () => safeOpen(),
-    },
-  ],
+  ...launcher,
 
   // Optionally register a sidebar tab as a third entry point. Feature-detect
   // extensionManager (recent) and degrade silently if absent.

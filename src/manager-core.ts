@@ -122,7 +122,7 @@ export function partitionUpdateResults(results: readonly UpdateCheckResult[]): {
 }
 
 /** One release of GET /touch_manager/versions. */
-export interface ReleaseInfo {
+interface ReleaseInfo {
   tag: string;
   name: string;
   published_at: string;

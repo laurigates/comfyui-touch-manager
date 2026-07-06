@@ -1,106 +1,13 @@
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
-}
-function fuzzyRank(query, fields, primaryWeight = 10) {
-  if (!query)
-    return { score: 0, primaryMatches: [] };
-  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length)
-    return { score: 0, primaryMatches: [] };
-  const primary = fields[0] || "";
-  const rest = fields.slice(1).filter((f) => Boolean(f));
-  let totalScore = 0;
-  const primaryMatchSet = new Set;
-  for (const token of tokens) {
-    const primaryResult = fuzzyScore(token, primary);
-    let best = primaryResult ? {
-      score: primaryResult.score * primaryWeight,
-      matches: primaryResult.matches,
-      onPrimary: true
-    } : null;
-    for (const field of rest) {
-      const r = fuzzyScore(token, field);
-      if (r && (!best || r.score > best.score)) {
-        best = { score: r.score, matches: r.matches, onPrimary: false };
-      }
-    }
-    if (!best)
-      return null;
-    totalScore += best.score;
-    if (best.onPrimary) {
-      for (const i of best.matches)
-        primaryMatchSet.add(i);
-    }
-  }
-  return {
-    score: totalScore,
-    primaryMatches: [...primaryMatchSet].sort((a, b) => a - b)
-  };
-}
-function highlightMatches(target, matchIndices) {
-  const frag = document.createDocumentFragment();
-  if (!target)
-    return frag;
-  const set = new Set(matchIndices || []);
-  if (!set.size) {
-    frag.appendChild(document.createTextNode(target));
-    return frag;
-  }
-  for (let i = 0;i < target.length; i++) {
-    const ch = target[i];
-    if (set.has(i)) {
-      const m = document.createElement("span");
-      m.className = "cmp-match";
-      m.textContent = ch;
-      frag.appendChild(m);
-    } else {
-      frag.appendChild(document.createTextNode(ch));
-    }
-  }
-  return frag;
+function ensureStyleOnce(id, css) {
+  if (typeof document === "undefined")
+    return;
+  if (document.getElementById(id))
+    return;
+  const s = document.createElement("style");
+  s.id = id;
+  s.textContent = css;
+  document.head.appendChild(s);
 }
 var STYLE_ID = "cmn-notify-style";
 var CONTAINER_ID = "cmn-notify-container";
@@ -227,16 +134,6 @@ var CSS = `
 .cmn-copy:hover  { background: #34343f; color: #fff; }
 .cmn-copy.cmn-copied { background: #2f4a30; border-color: #4caf50; color: #cfe8d0; }
 `;
-function ensureStyle() {
-  if (typeof document === "undefined")
-    return;
-  if (document.getElementById(STYLE_ID))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID;
-  s.textContent = CSS;
-  document.head.appendChild(s);
-}
 function ensureContainer() {
   let c = document.getElementById(CONTAINER_ID);
   if (!c) {
@@ -253,7 +150,7 @@ function notify(opts) {
     console.info(`[notify] ${severity}: ${summary}${detail ? ` — ${detail}` : ""}`);
     return null;
   }
-  ensureStyle();
+  ensureStyleOnce(STYLE_ID, CSS);
   const container = ensureContainer();
   const life = opts.life ?? defaultLife(severity);
   const copyable = opts.copyable ?? defaultCopyable(severity);
@@ -315,8 +212,199 @@ function notify(opts) {
   }
   return { close, el: toast };
 }
+var FAMILY_MENU_PATH = ["Extensions", "Touch Tools"];
+var KEBAB_COMMAND_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*\.[a-z0-9]+(?:-[a-z0-9]+)*$/;
+function makeLauncher(opts) {
+  if (!KEBAB_COMMAND_ID.test(opts.id)) {
+    console.warn(`[comfy-modal-kit] launcher id "${opts.id}" does not match the family convention "<pack-short-name>.<action>" (kebab-case)`);
+  }
+  const safeOpen = () => {
+    try {
+      opts.open();
+    } catch (e) {
+      console.error(`[comfy-modal-kit] launcher "${opts.id}" open failed`, e);
+      try {
+        notify({
+          severity: "error",
+          summary: opts.failSummary ?? `Could not open ${opts.label}`,
+          detail: String(e)
+        });
+      } catch (notifyErr) {
+        console.warn(`[comfy-modal-kit] notify failed`, notifyErr);
+      }
+    }
+  };
+  const fields = {
+    commands: [{ id: opts.id, label: opts.label, icon: opts.icon, function: safeOpen }],
+    menuCommands: [{ path: [...opts.menuPath ?? FAMILY_MENU_PATH], commands: [opts.id] }]
+  };
+  if (opts.actionBar !== false) {
+    const bar = typeof opts.actionBar === "object" ? opts.actionBar : {};
+    fields.actionBarButtons = [
+      {
+        icon: opts.icon,
+        ...bar.label !== undefined ? { label: bar.label } : {},
+        tooltip: bar.tooltip ?? opts.tooltip ?? opts.label,
+        onClick: safeOpen
+      }
+    ];
+  }
+  return fields;
+}
+var KEY = Symbol.for("laurigates.comfyModalKit");
+function getKit() {
+  const g = globalThis;
+  let kit = g[KEY];
+  if (!kit) {
+    kit = { fieldProviders: [], activeModal: null, pointerClaim: null };
+    g[KEY] = kit;
+  }
+  return kit;
+}
+var guardInstalled = false;
+function setActiveModal(handle) {
+  installPointerGuard();
+  dismissActiveModal();
+  getKit().activeModal = handle;
+}
+function dismissActiveModal() {
+  const kit = getKit();
+  const active = kit.activeModal;
+  if (!active)
+    return;
+  kit.activeModal = null;
+  try {
+    active.close();
+  } catch (e) {
+    console.warn("[comfy-modal-kit] active modal close() threw", e);
+  }
+}
+function getActiveModal() {
+  return getKit().activeModal;
+}
+function installPointerGuard() {
+  if (guardInstalled)
+    return;
+  if (typeof window === "undefined")
+    return;
+  guardInstalled = true;
+  window.addEventListener("pointerdown", pointerGuard, true);
+}
+function pointerGuard(e) {
+  const active = getKit().activeModal;
+  if (!active)
+    return;
+  const target = e.target;
+  if (active.element && target && active.element.contains(target)) {
+    return;
+  }
+  e.stopImmediatePropagation();
+  dismissActiveModal();
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+function fuzzyRank(query, fields, primaryWeight = 10) {
+  if (!query)
+    return { score: 0, primaryMatches: [] };
+  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length)
+    return { score: 0, primaryMatches: [] };
+  const primary = fields[0] || "";
+  const rest = fields.slice(1).filter((f) => Boolean(f));
+  let totalScore = 0;
+  const primaryMatchSet = new Set;
+  for (const token of tokens) {
+    const primaryResult = fuzzyScore(token, primary);
+    let best = primaryResult ? {
+      score: primaryResult.score * primaryWeight,
+      matches: primaryResult.matches,
+      onPrimary: true
+    } : null;
+    for (const field of rest) {
+      const r = fuzzyScore(token, field);
+      if (r && (!best || r.score > best.score)) {
+        best = { score: r.score, matches: r.matches, onPrimary: false };
+      }
+    }
+    if (!best)
+      return null;
+    totalScore += best.score;
+    if (best.onPrimary) {
+      for (const i of best.matches)
+        primaryMatchSet.add(i);
+    }
+  }
+  return {
+    score: totalScore,
+    primaryMatches: [...primaryMatchSet].sort((a, b) => a - b)
+  };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
+}
 var STYLE_ID2 = "cmp-shell-style";
-var ACTIVE = null;
 var CSS2 = `
 .cmp-backdrop {
     position: fixed;
@@ -466,37 +554,10 @@ var CSS2 = `
     color: #b8b8c0;
 }
 `;
-function ensureStyle2() {
-  if (document.getElementById(STYLE_ID2))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID2;
-  s.textContent = CSS2;
-  document.head.appendChild(s);
-}
-function dismissActive() {
-  if (!ACTIVE)
-    return;
-  const a = ACTIVE;
-  ACTIVE = null;
-  try {
-    a.backdrop.remove();
-    a.dialog.remove();
-    document.removeEventListener("keydown", a._onKey, true);
-  } finally {
-    try {
-      a.opts.onClose?.();
-    } catch (e) {
-      console.warn("[modal-shell] onClose threw", e);
-    }
-  }
-}
 function openModalShell(opts = {}) {
-  ensureStyle2();
-  dismissActive();
+  ensureStyleOnce(STYLE_ID2, CSS2);
   const backdrop = document.createElement("div");
   backdrop.className = "cmp-backdrop";
-  backdrop.addEventListener("pointerdown", dismissActive);
   const dialog = document.createElement("div");
   dialog.className = "cmp-dialog";
   if (opts.width)
@@ -523,7 +584,6 @@ function openModalShell(opts = {}) {
   closeBtn.type = "button";
   closeBtn.textContent = "×";
   closeBtn.title = "Close (Esc)";
-  closeBtn.addEventListener("click", dismissActive);
   headerEl.append(titleEl, closeBtn);
   const toolbarEl = document.createElement("div");
   toolbarEl.className = "cmp-toolbar";
@@ -556,11 +616,38 @@ function openModalShell(opts = {}) {
     footerEl.style.display = "none";
   }
   dialog.append(headerEl, toolbarEl, searchRow, bodyEl, footerEl);
+  let torn = false;
+  const teardown = () => {
+    if (torn)
+      return;
+    torn = true;
+    try {
+      backdrop.remove();
+      dialog.remove();
+      document.removeEventListener("keydown", onKey, true);
+    } finally {
+      try {
+        opts.onClose?.();
+      } catch (e) {
+        console.warn("[modal-shell] onClose threw", e);
+      }
+    }
+  };
+  const handle = { id: "modal-shell", element: dialog, close: teardown };
+  const requestClose = () => {
+    if (getActiveModal() === handle) {
+      dismissActiveModal();
+    } else {
+      teardown();
+    }
+  };
+  backdrop.addEventListener("pointerdown", requestClose);
+  closeBtn.addEventListener("click", requestClose);
   const onKey = (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      dismissActive();
+      requestClose();
       return;
     }
     try {
@@ -586,18 +673,151 @@ function openModalShell(opts = {}) {
     setStatus(s) {
       statusEl.textContent = s || "";
     },
-    close: dismissActive,
+    close: requestClose,
     _onKey: onKey,
     opts
   };
-  ACTIVE = controller;
+  setActiveModal(handle);
   if (opts.showSearch !== false) {
     requestAnimationFrame(() => {
-      if (ACTIVE === controller)
+      if (getActiveModal() === handle)
         searchEl.focus();
     });
   }
   return controller;
+}
+var STYLE_ID3 = "cmp-overlay-style";
+var CSS3 = `
+.cmp-ov-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    touch-action: manipulation;
+}
+.cmp-ov-card {
+    background: #1c1c24;
+    border: 1px solid #33333f;
+    border-radius: 10px;
+    padding: 18px;
+    width: min(520px, calc(100% - 24px));
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.cmp-ov-title { font-size: 15px; font-weight: 600; color: #e8e8ec; }
+.cmp-ov-msg { font-size: 13px; color: #b8b8c0; line-height: 1.5; word-break: break-word; }
+.cmp-ov-input {
+    font-size: 16px;
+    padding: 10px 12px;
+    background: #12121a;
+    border: 1px solid #3a3a44;
+    border-radius: 6px;
+    color: #e8e8ec;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.cmp-ov-input:focus { outline: none; border-color: #6ba6ff; }
+.cmp-ov-err { font-size: 12px; color: #ff7a7a; min-height: 14px; }
+.cmp-ov-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cmp-ov-btn {
+    font-size: 13px;
+    padding: 9px 16px;
+    border-radius: 6px;
+    border: 1px solid #3a3a44;
+    background: #2a2a36;
+    color: #d8d8dc;
+    cursor: pointer;
+    font-family: inherit;
+    min-height: 38px;
+}
+.cmp-ov-btn:hover { background: #3a3a4a; color: #fff; }
+.cmp-ov-primary { background: #2f3a52; color: #9ec6ff; border-color: #4a5878; }
+.cmp-ov-primary:hover { background: #3a4868; color: #fff; }
+.cmp-ov-danger { background: #4a2230; color: #ff9eb0; border-color: #78384a; }
+.cmp-ov-danger:hover { background: #5c2a3c; color: #fff; }
+`;
+function openShellOverlay(shell, opts = {}) {
+  ensureStyleOnce(STYLE_ID3, CSS3);
+  const backdrop = document.createElement("div");
+  backdrop.className = "cmp-ov-backdrop";
+  const card = document.createElement("div");
+  card.className = "cmp-ov-card";
+  backdrop.appendChild(card);
+  const onKey = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      dismiss();
+    }
+  };
+  let closed = false;
+  function close() {
+    if (closed)
+      return;
+    closed = true;
+    document.removeEventListener("keydown", onKey, true);
+    document.addEventListener("keydown", shell._onKey, true);
+    backdrop.remove();
+  }
+  function dismiss() {
+    opts.onDismiss?.();
+    close();
+  }
+  backdrop.addEventListener("pointerdown", (e) => {
+    if (e.target === backdrop)
+      dismiss();
+  });
+  document.removeEventListener("keydown", shell._onKey, true);
+  document.addEventListener("keydown", onKey, true);
+  shell.dialog.appendChild(backdrop);
+  return { card, close };
+}
+function confirmInShell(shell, opts) {
+  return new Promise((resolve) => {
+    const ov = openShellOverlay(shell, { onDismiss: () => resolve(false) });
+    const h = document.createElement("div");
+    h.className = "cmp-ov-title";
+    h.textContent = opts.title;
+    const p = document.createElement("div");
+    p.className = "cmp-ov-msg";
+    p.textContent = opts.message;
+    const row = document.createElement("div");
+    row.className = "cmp-ov-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cmp-ov-btn";
+    cancel.textContent = opts.cancelLabel || "Cancel";
+    cancel.addEventListener("click", () => {
+      ov.close();
+      resolve(false);
+    });
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = opts.danger ? "cmp-ov-btn cmp-ov-danger" : "cmp-ov-btn cmp-ov-primary";
+    ok.textContent = opts.confirmLabel || "OK";
+    const confirm = () => {
+      ov.close();
+      resolve(true);
+    };
+    ok.addEventListener("click", confirm);
+    if (opts.enterConfirms) {
+      ov.card.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          confirm();
+        }
+      });
+    }
+    row.append(cancel, ok);
+    ov.card.append(h, p, row);
+    ok.focus();
+  });
 }
 
 // src/index.ts
@@ -891,54 +1111,8 @@ function toast(severity, summary, detail, life) {
     console.warn(`[${EXT_NAME}] toast failed`, e);
   }
 }
-function confirmAction(state, title, message, opts = {}) {
-  return new Promise((resolve) => {
-    const overlay = el("div", "tm-confirm-overlay");
-    const box = el("div", "tm-confirm-box");
-    box.appendChild(el("div", "tm-confirm-title", title));
-    box.appendChild(el("div", "tm-confirm-msg", message));
-    const actions = el("div", "tm-confirm-actions");
-    let settled = false;
-    const finish = (result) => {
-      if (settled)
-        return;
-      settled = true;
-      window.removeEventListener("keydown", onKey, true);
-      overlay.remove();
-      resolve(result);
-    };
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        finish(false);
-      } else if (e.key === "Enter") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        finish(true);
-      }
-    };
-    const cancel = button("Cancel", "tm-confirm-cancel", () => finish(false));
-    const ok = button(opts.confirmLabel ?? "Confirm", `tm-confirm-ok ${opts.danger ? "tm-btn-danger" : "tm-btn-primary"}`, () => finish(true));
-    actions.append(cancel, ok);
-    box.appendChild(actions);
-    overlay.appendChild(box);
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay)
-        finish(false);
-    });
-    state.shell.dialog.appendChild(overlay);
-    window.addEventListener("keydown", onKey, true);
-    requestAnimationFrame(() => ok.focus());
-  });
-}
-var STYLE_ID3 = "touch-manager-style";
-function ensureStyle3() {
-  if (document.getElementById(STYLE_ID3))
-    return;
-  const s = document.createElement("style");
-  s.id = STYLE_ID3;
-  s.textContent = `
+var STYLE_ID4 = "touch-manager-style";
+var CSS4 = `
 .tm-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 44px; padding: 10px 12px;
   font-size: 15px; border-radius: 8px; border: 1px solid var(--border-color, #444);
@@ -975,22 +1149,8 @@ function ensureStyle3() {
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
 .tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tm-updates-head .tm-row-meta { margin-left: auto; }
-/* In-modal confirmation. The shell sits at z-index 9999; ComfyUI's own
-   PrimeVue confirm dialog renders BELOW it (≈1100) and is invisible behind
-   our backdrop — so we draw our own overlay inside the dialog instead. */
-.tm-confirm-overlay { position: absolute; inset: 0; z-index: 5; display: flex;
-  align-items: center; justify-content: center; padding: 16px;
-  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); }
-.tm-confirm-box { width: min(460px, 100%); display: flex; flex-direction: column; gap: 12px;
-  padding: 18px; border-radius: 12px; background: var(--comfy-menu-bg, #1e1e1e);
-  border: 1px solid var(--border-color, #444); box-shadow: 0 16px 48px rgba(0,0,0,0.7); }
-.tm-confirm-title { font-size: 17px; font-weight: 700; }
-.tm-confirm-msg { font-size: 14px; line-height: 1.45; opacity: 0.9; word-break: break-word; }
-.tm-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .cmp-match { text-decoration: underline; }
 `;
-  document.head.appendChild(s);
-}
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className)
@@ -1026,7 +1186,7 @@ function restartBanner(state) {
 }
 function openManager() {
   try {
-    ensureStyle3();
+    ensureStyleOnce(STYLE_ID4, CSS4);
   } catch (e) {
     console.warn(`[${EXT_NAME}] style injection failed`, e);
   }
@@ -1247,7 +1407,13 @@ async function doUpdate(state, name, opts = {}) {
   }
 }
 async function doUninstall(state, name) {
-  const ok = await confirmAction(state, "Disable pack?", `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`, { confirmLabel: "Disable", danger: true });
+  const ok = await confirmInShell(state.shell, {
+    title: "Disable pack?",
+    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
+    confirmLabel: "Disable",
+    danger: true,
+    enterConfirms: true
+  });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1535,7 +1701,12 @@ async function doInstall(state, url, ref) {
     toast("warn", "Invalid URL", urlValidationHint(v.reason));
     return;
   }
-  const ok = await confirmAction(state, "Install pack?", `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`, { confirmLabel: "Install" });
+  const ok = await confirmInShell(state.shell, {
+    title: "Install pack?",
+    message: `Clone ${url.trim()} into custom_nodes as "${v.name}"? Only install code you trust. A restart is required.`,
+    confirmLabel: "Install",
+    enterConfirms: true
+  });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1675,7 +1846,12 @@ function registryVersionRow(state, node, entry) {
 }
 async function doRegistryInstall(state, node, version) {
   const label = version ? `${node.name}@${version}` : `${node.name} (latest)`;
-  const ok = await confirmAction(state, "Install from registry?", `Download and install ${label} from the Comfy Registry into custom_nodes? ` + "Only install code you trust. A restart is required.", { confirmLabel: "Install" });
+  const ok = await confirmInShell(state.shell, {
+    title: "Install from registry?",
+    message: `Download and install ${label} from the Comfy Registry into custom_nodes? ` + "Only install code you trust. A restart is required.",
+    confirmLabel: "Install",
+    enterConfirms: true
+  });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1734,7 +1910,13 @@ async function renderCoreTab(state) {
   section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo and installs any changed Python dependencies. Restart ComfyUI yourself afterwards."));
 }
 async function doReboot(state) {
-  const ok = await confirmAction(state, "Restart ComfyUI?", "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.", { confirmLabel: "Restart now", danger: true });
+  const ok = await confirmInShell(state.shell, {
+    title: "Restart ComfyUI?",
+    message: "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+    confirmLabel: "Restart now",
+    danger: true,
+    enterConfirms: true
+  });
   if (!ok)
     return;
   toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
@@ -1751,7 +1933,12 @@ async function doReboot(state) {
   }
 }
 async function doCoreUpdate(state) {
-  const ok = await confirmAction(state, "Update ComfyUI core?", "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.", { confirmLabel: "Update core" });
+  const ok = await confirmInShell(state.shell, {
+    title: "Update ComfyUI core?",
+    message: "Run git pull on the core repo? Python dependencies are installed automatically when they change; a manual restart is required afterwards.",
+    confirmLabel: "Update core",
+    enterConfirms: true
+  });
   if (!ok)
     return;
   state.shell.setBusy(true);
@@ -1771,23 +1958,14 @@ async function doCoreUpdate(state) {
 
 // src/index.ts
 var EXT_NAME2 = "comfyui-touch-manager";
-var OPEN_COMMAND_ID = "TouchManager.Open";
-function safeOpen() {
-  try {
-    openManager();
-  } catch (e) {
-    console.error(`[${EXT_NAME2}] failed to open node manager`, e);
-    try {
-      notify({
-        severity: "error",
-        summary: "Could not open Touch Node Manager",
-        detail: String(e)
-      });
-    } catch (notifyErr) {
-      console.warn(`[${EXT_NAME2}] notify failed`, notifyErr);
-    }
-  }
-}
+var launcher = makeLauncher({
+  id: "touch-manager.open",
+  label: "Touch Node Manager",
+  icon: "pi pi-th-large",
+  failSummary: "Could not open Touch Node Manager",
+  open: openManager
+});
+var safeOpen = launcher.commands[0]?.function ?? openManager;
 app2.registerExtension({
   name: "comfy.touch-manager",
   settings: [
@@ -1799,27 +1977,7 @@ app2.registerExtension({
       defaultValue: false
     }
   ],
-  commands: [
-    {
-      id: OPEN_COMMAND_ID,
-      label: "Touch Node Manager",
-      icon: "pi pi-th-large",
-      function: () => safeOpen()
-    }
-  ],
-  menuCommands: [
-    {
-      path: ["Extensions"],
-      commands: [OPEN_COMMAND_ID]
-    }
-  ],
-  actionBarButtons: [
-    {
-      icon: "pi pi-th-large",
-      tooltip: "Touch Node Manager",
-      onClick: () => safeOpen()
-    }
-  ],
+  ...launcher,
   setup() {
     try {
       const em = app2.extensionManager;

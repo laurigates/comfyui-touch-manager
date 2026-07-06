@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.11](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.10...comfyui-touch-manager-v0.1.11) (2026-07-06)
+
+
+### Features
+
+* adopt kit makeLauncher + confirmInShell + ensureStyleOnce; kebab command id ([#32](https://github.com/laurigates/comfyui-touch-manager/issues/32)) ([cb80c8f](https://github.com/laurigates/comfyui-touch-manager/commit/cb80c8fa10fd606f96131cfcba913d96440b7f04))
+
+
+### Bug Fixes
+
+* refresh lockfile and rebuild dist against published comfy-modal-kit 0.6.0 ([#34](https://github.com/laurigates/comfyui-touch-manager/issues/34)) ([226faeb](https://github.com/laurigates/comfyui-touch-manager/commit/226faebaace7b6ea6aa2395544d689ea001bac8a))
+
 ## [0.1.10](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.9...comfyui-touch-manager-v0.1.10) (2026-07-06)
 
 

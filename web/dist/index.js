@@ -776,9 +776,6 @@ function formatDepsResult(deps) {
     text: `Dependency install failed (${sources})${deps.error ? `: ${deps.error}` : ""} — install them manually before restarting.`
   };
 }
-function formatCommitLine(entry) {
-  return `${entry.sha} ${entry.subject}`.trim();
-}
 function formatCoreBehind(behind) {
   const parts = [];
   if (behind.origin != null && behind.origin > 0)
@@ -1137,6 +1134,9 @@ function syncSearch(state) {
 }
 function markRestartPending(state) {
   state.restartPending = true;
+  const body = state.shell.bodyEl;
+  if (!body.querySelector(".tm-restart"))
+    body.prepend(restartBanner(state));
 }
 async function renderInstalledTab(state) {
   const section = resetBody(state);
@@ -1190,7 +1190,7 @@ function installedRow(state, pack, matches) {
     row.appendChild(el("div", "tm-row-meta", pack.remote_url));
   const actions = el("div", "tm-row-actions");
   const gitDisabledReason = pack.is_git ? "" : "not a git repo";
-  const updateBtn = button("Update", "", () => void doUpdate(state, pack.name));
+  const updateBtn = button("Update", "", () => void doUpdate(state, pack.name, { origin: "installed" }));
   updateBtn.disabled = !pack.is_git;
   if (gitDisabledReason)
     updateBtn.title = gitDisabledReason;
@@ -1211,46 +1211,39 @@ function removeFromUpdatesCache(state, name) {
     return;
   state.updates.results = state.updates.results.filter((r) => r.name !== name);
 }
-function updateResultBack(state, origin) {
-  if (origin === "updates") {
-    return button("← Back to updates", "", () => void renderUpdatesTab(state));
+async function refreshInstalledList(state) {
+  const top = state.shell.bodyEl.scrollTop;
+  try {
+    const data = await apiGet("installed");
+    state.installed = data.packs ?? [];
+  } catch {
+    return;
   }
-  return button("← Back to installed", "", () => void renderInstalledTab(state));
+  if (state.activeTab !== "installed")
+    return;
+  renderInstalledList(state);
+  requestAnimationFrame(() => {
+    state.shell.bodyEl.scrollTop = top;
+  });
 }
 async function doUpdate(state, name, opts = {}) {
-  if (opts.origin === "updates")
-    state.updatesScroll = state.shell.bodyEl.scrollTop;
   state.shell.setBusy(true);
   try {
     const result = await apiPost("update", opts.ref ? { name, ref: opts.ref } : { name });
     markRestartPending(state);
     removeFromUpdatesCache(state, name);
-    toast("success", `Updated ${name}`, formatUpdateSummary(result));
-    state.shell.setBusy(false);
-    renderUpdateResult(state, { ...result, name }, updateResultBack(state, opts.origin));
+    const deps = formatDepsResult(result.deps);
+    toast(deps?.level === "warn" ? "warn" : "success", `Updated ${name}`, deps ? `${formatUpdateSummary(result)} — ${deps.text}` : formatUpdateSummary(result));
+    if (opts.origin === "updates") {
+      repaintUpdatesList(state);
+    } else if (opts.origin === "installed") {
+      await refreshInstalledList(state);
+    }
   } catch (e) {
     const err = e;
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
     state.shell.setBusy(false);
-  }
-}
-function renderUpdateResult(state, result, back) {
-  const section = resetBody(state);
-  section.appendChild(back);
-  section.appendChild(el("div", "tm-row-title", `Updated ${result.name}`));
-  section.appendChild(el("div", "tm-row-meta", formatUpdateSummary(result)));
-  const deps = formatDepsResult(result.deps);
-  if (deps)
-    section.appendChild(el("div", `tm-note tm-note-${deps.level}`, deps.text));
-  if (result.commit_log.length > 0) {
-    section.appendChild(el("div", "tm-field-label", "Applied commits"));
-    const list = el("div", "tm-list");
-    for (const entry of result.commit_log) {
-      list.appendChild(el("div", "tm-row-meta", formatCommitLine(entry)));
-    }
-    if (result.truncated)
-      list.appendChild(el("div", "tm-row-meta", "…older commits omitted"));
-    section.appendChild(list);
   }
 }
 async function doUninstall(state, name) {

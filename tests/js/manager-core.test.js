@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 // plus the fuzzy-filter glue. No DOM — runs in the node environment.
 import {
   filterPacks,
-  formatCommitLine,
   formatCoreBehind,
   formatDepsResult,
   formatDownloads,
@@ -248,10 +247,6 @@ describe("update-result formatting", () => {
     expect(note?.level).toBe("warn");
     expect(note?.text).toMatch(/pip exited 1/);
     expect(note?.text).toMatch(/install them manually/);
-  });
-
-  it("formats a commit line as '<short> <subject>'", () => {
-    expect(formatCommitLine({ sha: "abc1234", subject: "fix: thing" })).toBe("abc1234 fix: thing");
   });
 });
 

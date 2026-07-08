@@ -12,6 +12,18 @@ import { __fetchCalls, __reset, __responses } from "./__mocks__/app.js";
 // Let queued microtasks + the deferred initial load settle.
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+// A minimal installed git-pack row, as GET /touch_manager/installed returns it.
+const gitPack = (name) => ({
+  name,
+  path: `/x/${name}`,
+  root: "/x",
+  is_git: true,
+  ref: { type: "branch", name: "main", sha: "abc1234" },
+  remote_url: `https://github.com/laurigates/${name}`,
+  dirty: false,
+  enabled: true,
+});
+
 describe("openManager (jsdom modal smoke)", () => {
   beforeEach(() => {
     document.body.replaceChildren();
@@ -46,9 +58,11 @@ describe("openManager (jsdom modal smoke)", () => {
     await flush();
 
     const tabLabels = [...document.querySelectorAll("button")].map((b) => b.textContent);
-    for (const label of ["Installed", "Updates", "Install URL", "Core"]) {
+    for (const label of ["Installed", "Install URL", "Registry", "Core"]) {
       expect(tabLabels).toContain(label);
     }
+    // The Updates tab is gone — folded into the Installed list.
+    expect(tabLabels).not.toContain("Updates");
 
     // Backend is actually wired: config (gating) + installed (initial tab).
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/config"))).toBe(true);
@@ -148,12 +162,17 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(document.body.textContent).toMatch(/requirements\.txt/);
   });
 
-  it("streams update rows from per-pack checks on the Updates tab", async () => {
+  it("lazily loads available-update info into the Installed rows in the background", async () => {
+    // Two installed git packs; one has an update, the other is current.
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [gitPack("pack-a"), gitPack("pack-b")],
+    };
     __responses["/touch_manager/updates/list"] = {
       ok: true,
       packs: [{ name: "pack-a" }, { name: "pack-b" }],
     };
-    __responses["/touch_manager/updates/check"] = {
+    __responses["/touch_manager/updates/check?name=pack-a"] = {
       ok: true,
       name: "pack-a",
       update_available: true,
@@ -162,27 +181,30 @@ describe("openManager (jsdom modal smoke)", () => {
       error: null,
       incoming: [{ sha: "abc1234", subject: "feat: streamed change" }],
     };
+    __responses["/touch_manager/updates/check?name=pack-b"] = {
+      ok: true,
+      name: "pack-b",
+      update_available: false,
+      behind: 0,
+      ahead: 0,
+      error: null,
+      incoming: [],
+    };
     openManager();
-    await flush();
-    await flush();
+    // The list paints instantly, then the sweep fetches list + per-pack checks.
+    for (let i = 0; i < 10; i++) await flush();
 
-    const updatesTab = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent === "Updates",
-    );
-    updatesTab?.click();
-    await flush();
-
-    const checkBtn = [...document.querySelectorAll("button")].find(
-      (b) => b.textContent === "Check for updates",
-    );
-    checkBtn?.click();
-    // Let the list fetch + both per-pack checks settle.
-    for (let i = 0; i < 6; i++) await flush();
-
+    // The list is up front — no explicit "Check for updates" click needed.
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/updates/list"))).toBe(true);
     const checks = __fetchCalls.filter((u) => u.includes("/touch_manager/updates/check"));
-    expect(checks.length).toBe(2); // one per listed pack
+    expect(checks.length).toBe(2); // one per listed git pack
+
+    // The available update landed inside pack-a's row, with the incoming commit.
+    expect(document.body.textContent).toContain("update available");
     expect(document.body.textContent).toContain("feat: streamed change");
+    // Exactly one pack is flagged as having an update; the header counts it.
+    expect(document.querySelectorAll(".tm-has-update").length).toBe(1);
+    expect(document.body.textContent).toContain("1 update available");
   });
 
   it("searches the registry and installs a chosen version with source badges", async () => {
@@ -309,10 +331,15 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(false);
   });
 
-  // ----- Updates tab: caching, filtering, scroll/back-navigation -----
+  // ----- background update sweep: caching, filtering, in-place update -----
 
-  // Two distinctly-named packs, both with an available update.
+  // Two installed git packs, both with an available update, wired for the
+  // background sweep the Installed tab kicks off on open.
   const seedTwoUpdates = () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [gitPack("pack-alpha"), gitPack("pack-beta")],
+    };
     __responses["/touch_manager/updates/list"] = {
       ok: true,
       packs: [{ name: "pack-alpha" }, { name: "pack-beta" }],
@@ -337,50 +364,44 @@ describe("openManager (jsdom modal smoke)", () => {
     };
   };
 
-  const openUpdatesAndCheck = async () => {
+  const openInstalledAndSweep = async () => {
     openManager();
-    await flush();
-    await flush();
-    [...document.querySelectorAll("button")].find((b) => b.textContent === "Updates")?.click();
-    await flush();
-    [...document.querySelectorAll("button")]
-      .find((b) => b.textContent === "Check for updates")
-      ?.click();
-    for (let i = 0; i < 8; i++) await flush();
+    for (let i = 0; i < 10; i++) await flush();
   };
 
-  it("caches the sweep — leaving and re-entering Updates does not re-check", async () => {
+  it("caches the sweep — leaving and re-entering Installed does not re-check", async () => {
     seedTwoUpdates();
-    await openUpdatesAndCheck();
+    await openInstalledAndSweep();
 
     const checksAfterFirst = __fetchCalls.filter((u) =>
       u.includes("/touch_manager/updates/check"),
     ).length;
     expect(checksAfterFirst).toBe(2);
     expect(document.body.textContent).toContain("pack-alpha");
+    // A finished sweep offers a Re-check affordance + an updates-available count.
+    expect(
+      [...document.querySelectorAll("button")].some((b) => b.textContent === "Re-check updates"),
+    ).toBe(true);
+    expect(document.body.textContent).toContain("2 updates available");
 
     // Switch away and back.
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Install URL")?.click();
+    for (let i = 0; i < 4; i++) await flush();
     [...document.querySelectorAll("button")].find((b) => b.textContent === "Installed")?.click();
     for (let i = 0; i < 4; i++) await flush();
-    [...document.querySelectorAll("button")].find((b) => b.textContent === "Updates")?.click();
-    for (let i = 0; i < 4; i++) await flush();
 
-    // No new per-pack checks — the cached results repaint instead.
+    // No new per-pack checks — the cached results repaint into the rows instead.
     const checksAfterReturn = __fetchCalls.filter((u) =>
       u.includes("/touch_manager/updates/check"),
     ).length;
     expect(checksAfterReturn).toBe(2);
-    expect(document.body.textContent).toContain("pack-alpha");
-    // A finished sweep offers a Re-check affordance + last-checked label.
-    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "Re-check")).toBe(
-      true,
-    );
-    expect(document.body.textContent).toMatch(/Last checked/);
+    expect(document.body.textContent).toContain("2 updates available");
+    expect(document.querySelectorAll(".tm-has-update").length).toBe(2);
   });
 
-  it("filters the cached updates list by pack name", async () => {
+  it("filters the Installed list by pack name", async () => {
     seedTwoUpdates();
-    await openUpdatesAndCheck();
+    await openInstalledAndSweep();
     expect(document.body.textContent).toContain("pack-alpha");
     expect(document.body.textContent).toContain("pack-beta");
 
@@ -389,12 +410,12 @@ describe("openManager (jsdom modal smoke)", () => {
     search.dispatchEvent(new Event("input"));
     await flush();
 
-    const list = document.querySelector(".tm-updates-list");
+    const list = document.querySelector(".tm-list");
     expect(list.textContent).toContain("pack-alpha");
     expect(list.textContent).not.toContain("pack-beta");
   });
 
-  it("updating from the Updates list drops the pack in place — no result panel", async () => {
+  it("updating a pack from its row clears its update badge in place — no re-sweep", async () => {
     seedTwoUpdates();
     __responses["/touch_manager/update"] = {
       ok: true,
@@ -407,28 +428,34 @@ describe("openManager (jsdom modal smoke)", () => {
       deps_changed: false,
       truncated: false,
     };
-    await openUpdatesAndCheck();
+    await openInstalledAndSweep();
+    expect(document.querySelectorAll(".tm-has-update").length).toBe(2);
 
     const checksBefore = __fetchCalls.filter((u) =>
       u.includes("/touch_manager/updates/check"),
     ).length;
 
-    // Update pack-alpha from its row (the first Update button in the list).
-    const list = document.querySelector(".tm-updates-list");
-    [...list.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
-    for (let i = 0; i < 4; i++) await flush();
+    // Update pack-alpha from its row (the emphasized Update button on its row).
+    const alphaRow = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("pack-alpha"),
+    );
+    [...alphaRow.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
+    for (let i = 0; i < 6; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
-    // No transition: the cached list repaints in place — no Back affordance,
-    // the updated pack's row is gone, the rest stay.
+    // No transition: the list refreshes in place — no Back affordance.
     expect(
       [...document.querySelectorAll("button")].some((b) => b.textContent?.startsWith("← Back")),
     ).toBe(false);
-    const list2 = document.querySelector(".tm-updates-list");
-    expect(list2.textContent).not.toContain("pack-alpha");
-    expect(list2.textContent).toContain("pack-beta");
+    // pack-alpha's badge is gone (it is now at its target); pack-beta keeps its.
+    expect(document.querySelectorAll(".tm-has-update").length).toBe(1);
+    expect(document.body.textContent).toContain("1 update available");
+    const betaRow = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("pack-beta"),
+    );
+    expect(betaRow.classList.contains("tm-has-update")).toBe(true);
 
-    // And no fresh sweep — the cached results were reused.
+    // And no fresh sweep — the cached results were reused (just the one pack dropped).
     const checksAfter = __fetchCalls.filter((u) =>
       u.includes("/touch_manager/updates/check"),
     ).length;

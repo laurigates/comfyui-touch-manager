@@ -6,8 +6,9 @@
 // syncing EXT_NAME / the /touch_manager/ route namespace. See ADR-0001.
 //
 // This pack is a NODE MANAGER, not a widget interceptor. It opens a
-// full-screen, touch-first modal (tabs: Installed / Updates / Install-from-URL
-// / Core) that drives the /touch_manager/* backend routes. The modal itself
+// full-screen, touch-first modal (tabs: Installed / Install-from-URL /
+// Registry / Core) that drives the /touch_manager/* backend routes. The
+// Installed list shows available updates inline (lazy-loaded). The modal itself
 // lives in touch-manager-ui.ts; the pure helpers in manager-core.ts. This file
 // is thin: it only registers the extension and wires the open entry points.
 //

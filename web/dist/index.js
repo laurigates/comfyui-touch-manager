@@ -827,9 +827,6 @@ import { app as app2 } from "/scripts/app.js";
 import { app } from "/scripts/app.js";
 
 // src/manager-core.ts
-function formatProgress(done, total) {
-  return `checked ${done}/${total}`;
-}
 function partitionUpdateResults(results) {
   const actionable = [];
   const errored = [];
@@ -1147,8 +1144,11 @@ var CSS4 = `
 .tm-badge-git { background: rgba(40,90,160,0.25); }
 .tm-badge-registry { background: rgba(120,60,160,0.25); }
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
-.tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.tm-updates-head .tm-row-meta { margin-left: auto; }
+.tm-installed-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 2px; }
+.tm-installed-head .tm-sweep-label { margin-left: auto; }
+.tm-row.tm-has-update { border-color: rgba(200,150,20,0.7); }
+.tm-update-status { display: flex; flex-direction: column; gap: 2px; }
+.tm-update-status .tm-update-available { color: #e2b23a; font-weight: 600; }
 .cmp-match { text-decoration: underline; }
 `;
 function el(tag, className, text) {
@@ -1205,14 +1205,13 @@ function openManager() {
     installed: [],
     activeTab: "installed",
     restartPending: false,
-    updates: null,
-    search: { installed: "", updates: "" },
-    updatesScroll: 0
+    sweep: null,
+    search: { installed: "" },
+    rowByName: new Map
   };
   const tabBar = el("div", "tm-tabs");
   const tabs = [
     { id: "installed", label: "Installed" },
-    { id: "updates", label: "Updates" },
     { id: "install", label: "Install URL" },
     { id: "registry", label: "Registry" },
     { id: "core", label: "Core" }
@@ -1227,8 +1226,6 @@ function openManager() {
   }
   shell.toolbarEl.appendChild(tabBar);
   function selectTab(id) {
-    if (state.activeTab === "updates")
-      state.updatesScroll = shell.bodyEl.scrollTop;
     state.activeTab = id;
     for (const [tid, b] of tabButtons)
       b.classList.toggle("tm-active", tid === id);
@@ -1240,9 +1237,6 @@ function openManager() {
     if (state.activeTab === "installed") {
       state.search.installed = shell.searchEl.value;
       renderInstalledList(state);
-    } else if (state.activeTab === "updates") {
-      state.search.updates = shell.searchEl.value;
-      repaintUpdatesList(state);
     }
   });
   (async () => {
@@ -1259,8 +1253,6 @@ async function renderActiveTab(state, id) {
   switch (id) {
     case "installed":
       return renderInstalledTab(state);
-    case "updates":
-      return renderUpdatesTab(state);
     case "install":
       return renderInstallTab(state);
     case "registry":
@@ -1280,16 +1272,12 @@ function resetBody(state) {
 }
 function syncSearch(state) {
   const onInstalled = state.activeTab === "installed";
-  const onUpdates = state.activeTab === "updates" && state.updates != null;
   const row = state.shell.searchEl.parentElement;
   if (row)
-    row.style.display = onInstalled || onUpdates ? "" : "none";
+    row.style.display = onInstalled ? "" : "none";
   if (onInstalled) {
     state.shell.searchEl.placeholder = "Filter installed packs…";
     state.shell.searchEl.value = state.search.installed;
-  } else if (onUpdates) {
-    state.shell.searchEl.placeholder = "Filter updates…";
-    state.shell.searchEl.value = state.search.updates;
   }
 }
 function markRestartPending(state) {
@@ -1313,21 +1301,47 @@ async function renderInstalledTab(state) {
     state.shell.setBusy(false);
   }
   renderInstalledList(state);
+  if (!state.sweep)
+    startUpdateSweep(state);
 }
 function renderInstalledList(state) {
   const section = resetBody(state);
+  section.appendChild(installedHead(state));
   const query = state.shell.searchEl.value;
   const ranked = filterPacks(query, state.installed);
   state.shell.setStatus(`${ranked.length}/${state.installed.length}`);
+  state.rowByName = new Map;
   if (ranked.length === 0) {
     section.appendChild(emptyState(state.installed.length === 0 ? "No packs found." : "No matches."));
     return;
   }
   const list = el("div", "tm-list");
   for (const { pack, primaryMatches } of ranked) {
-    list.appendChild(installedRow(state, pack, primaryMatches));
+    const row = installedRow(state, pack, primaryMatches);
+    state.rowByName.set(pack.name, row);
+    list.appendChild(row);
   }
   section.appendChild(list);
+}
+function installedHead(state) {
+  const head = el("div", "tm-installed-head");
+  const sweeping = !!state.sweep && !state.sweep.complete;
+  const recheck = button("Re-check updates", "", () => void startUpdateSweep(state));
+  recheck.disabled = sweeping;
+  head.appendChild(recheck);
+  head.appendChild(el("div", "tm-row-meta tm-sweep-label", sweepLabel(state)));
+  return head;
+}
+function sweepLabel(state) {
+  const s = state.sweep;
+  if (!s)
+    return "";
+  if (!s.complete)
+    return `Checking for updates… ${s.results.size}/${s.total}`;
+  const { actionable } = partitionUpdateResults([...s.results.values()]);
+  if (actionable.length === 0)
+    return "All up to date";
+  return `${actionable.length} update${actionable.length === 1 ? "" : "s"} available`;
 }
 function installedRow(state, pack, matches) {
   const row = el("div", "tm-row");
@@ -1348,9 +1362,10 @@ function installedRow(state, pack, matches) {
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
   if (pack.remote_url)
     row.appendChild(el("div", "tm-row-meta", pack.remote_url));
+  row.appendChild(el("div", "tm-update-status"));
   const actions = el("div", "tm-row-actions");
   const gitDisabledReason = pack.is_git ? "" : "not a git repo";
-  const updateBtn = button("Update", "", () => void doUpdate(state, pack.name, { origin: "installed" }));
+  const updateBtn = button("Update", "tm-update-btn", () => void doUpdate(state, pack.name, { origin: "installed" }));
   updateBtn.disabled = !pack.is_git;
   if (gitDisabledReason)
     updateBtn.title = gitDisabledReason;
@@ -1364,12 +1379,42 @@ function installedRow(state, pack, matches) {
     actions.appendChild(button("Uninstall", "tm-btn-danger", () => void doUninstall(state, pack.name)));
   }
   row.appendChild(actions);
+  applyUpdateStatus(state, row, pack);
   return row;
 }
-function removeFromUpdatesCache(state, name) {
-  if (!state.updates)
+function applyUpdateStatus(state, row, pack) {
+  const status = row.querySelector(".tm-update-status");
+  const updateBtn = row.querySelector(".tm-update-btn");
+  if (!status)
     return;
-  state.updates.results = state.updates.results.filter((r) => r.name !== name);
+  status.replaceChildren();
+  row.classList.remove("tm-has-update");
+  updateBtn?.classList.remove("tm-btn-primary");
+  if (!pack.is_git)
+    return;
+  const info = state.sweep?.results.get(pack.name);
+  if (!info) {
+    if (state.sweep && !state.sweep.complete) {
+      status.appendChild(el("div", "tm-row-meta", "checking for updates…"));
+    }
+    return;
+  }
+  if (info.error) {
+    status.appendChild(el("div", "tm-row-meta", `update check failed: ${info.error}`));
+    return;
+  }
+  if (info.update_available) {
+    row.classList.add("tm-has-update");
+    updateBtn?.classList.add("tm-btn-primary");
+    status.appendChild(el("div", "tm-row-meta tm-update-available", formatUpdateStatus(info)));
+    for (const c of info.incoming) {
+      status.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
+    }
+    return;
+  }
+}
+function removeFromUpdatesCache(state, name) {
+  state.sweep?.results.delete(name);
 }
 async function refreshInstalledList(state) {
   const top = state.shell.bodyEl.scrollTop;
@@ -1394,9 +1439,7 @@ async function doUpdate(state, name, opts = {}) {
     removeFromUpdatesCache(state, name);
     const deps = formatDepsResult(result.deps);
     toast(deps?.level === "warn" ? "warn" : "success", `Updated ${name}`, deps ? `${formatUpdateSummary(result)} — ${deps.text}` : formatUpdateSummary(result));
-    if (opts.origin === "updates") {
-      repaintUpdatesList(state);
-    } else if (opts.origin === "installed") {
+    if (opts.origin === "installed") {
       await refreshInstalledList(state);
     }
   } catch (e) {
@@ -1420,7 +1463,7 @@ async function doUninstall(state, name) {
   try {
     await apiPost("uninstall", { name });
     markRestartPending(state);
-    state.updates = null;
+    state.sweep = null;
     toast("success", `Disabled ${name}`, "Restart ComfyUI to apply.");
     await renderInstalledTab(state);
   } catch (e) {
@@ -1487,122 +1530,58 @@ async function openVersions(state, pack) {
     section.appendChild(list);
   }
 }
-function lastCheckedLabel(cache) {
-  const t = new Date(cache.checkedAt);
-  const hh = String(t.getHours()).padStart(2, "0");
-  const mm = String(t.getMinutes()).padStart(2, "0");
-  return `Last checked ${hh}:${mm}`;
-}
-async function renderUpdatesTab(state) {
-  if (!state.updates) {
-    const section = resetBody(state);
-    section.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
-    section.appendChild(el("div", "tm-note tm-note-info", "Fetches each git pack's remote and compares against the tracked branch. " + "Results are cached — update a pack and come back without re-checking everything."));
-    return;
-  }
-  paintUpdatesTab(state);
-  restoreUpdatesScroll(state);
-}
-function restoreUpdatesScroll(state) {
-  const top = state.updatesScroll;
-  if (top <= 0)
-    return;
-  requestAnimationFrame(() => {
-    state.shell.bodyEl.scrollTop = top;
-  });
-}
-function updateRow(state, info, matches = []) {
-  const r = el("div", "tm-row");
-  const title = el("div", "tm-row-title");
-  title.appendChild(highlightMatches(info.name, matches));
-  r.appendChild(title);
-  r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
-  for (const c of info.incoming) {
-    r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
-  }
-  const actions = el("div", "tm-row-actions");
-  actions.appendChild(button("Update", "tm-btn-primary", () => void doUpdate(state, info.name, { origin: "updates" })));
-  r.appendChild(actions);
-  return r;
-}
-function paintUpdatesTab(state) {
-  if (!state.updates)
-    return;
-  const section = resetBody(state);
-  section.appendChild(el("div", "tm-updates-head"));
-  section.appendChild(el("div", "tm-list tm-updates-list"));
-  section.appendChild(el("div", "tm-section tm-updates-errors"));
-  syncSearch(state);
-  repaintUpdatesList(state);
-}
-function repaintUpdatesList(state) {
-  const cache = state.updates;
-  if (!cache)
-    return;
-  const body = state.shell.bodyEl;
-  const head = body.querySelector(".tm-updates-head");
-  const list = body.querySelector(".tm-updates-list");
-  const errorsWrap = body.querySelector(".tm-updates-errors");
-  if (!head || !list)
-    return;
-  head.replaceChildren();
-  const recheck = button("Re-check", "tm-btn-primary", () => void checkUpdates(state));
-  recheck.disabled = !cache.complete;
-  head.appendChild(recheck);
-  head.appendChild(el("div", "tm-row-meta", cache.complete ? lastCheckedLabel(cache) : "checking…"));
-  const { actionable, errored } = partitionUpdateResults(cache.results);
-  const ranked = filterPacks(state.search.updates, actionable);
-  list.replaceChildren();
-  for (const { pack, primaryMatches } of ranked) {
-    list.appendChild(updateRow(state, pack, primaryMatches));
-  }
-  if (ranked.length === 0) {
-    const message = actionable.length > 0 ? "No matches." : cache.complete ? "Everything is up to date." : "Checking…";
-    list.appendChild(emptyState(message));
-  }
-  if (errorsWrap) {
-    errorsWrap.replaceChildren();
-    if (errored.length > 0) {
-      errorsWrap.appendChild(el("div", "tm-field-label", "Could not check"));
-      for (const e of errored) {
-        errorsWrap.appendChild(el("div", "tm-row-meta", `${e.name}: ${e.error}`));
-      }
-    }
-  }
-  state.shell.setStatus(cache.complete ? `${ranked.length}/${actionable.length}` : formatProgress(cache.results.length, cache.total));
-}
 var UPDATE_CHECK_CONCURRENCY = 3;
-async function checkUpdates(state) {
-  const cache = { results: [], total: 0, checkedAt: Date.now(), complete: false };
-  state.updates = cache;
-  state.updatesScroll = 0;
-  const section = resetBody(state);
-  section.appendChild(emptyState("Listing git-backed packs…"));
-  state.shell.setBusy(true);
+function refreshSweepHead(state) {
+  const body = state.shell.bodyEl;
+  const label = body.querySelector(".tm-sweep-label");
+  if (label)
+    label.textContent = sweepLabel(state);
+  const recheck = body.querySelector(".tm-installed-head .tm-btn");
+  if (recheck)
+    recheck.disabled = !!state.sweep && !state.sweep.complete;
+}
+function patchRow(state, name) {
+  const row = state.rowByName.get(name);
+  if (!row)
+    return;
+  const pack = state.installed.find((p) => p.name === name);
+  if (pack)
+    applyUpdateStatus(state, row, pack);
+}
+async function startUpdateSweep(state) {
+  const sweep = {
+    token: {},
+    results: new Map,
+    total: 0,
+    checkedAt: Date.now(),
+    complete: false
+  };
+  state.sweep = sweep;
+  if (state.activeTab === "installed")
+    repaintUpdateStatuses(state);
   let names;
   try {
     const data = await apiGet("updates/list");
     names = (data.packs ?? []).map((p) => p.name);
-  } catch (e) {
-    state.shell.setBusy(false);
-    if (state.updates !== cache)
+  } catch {
+    if (state.sweep !== sweep)
       return;
-    state.updates = null;
-    const s = resetBody(state);
-    s.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
-    s.appendChild(emptyState(`Failed: ${e.message}`));
+    sweep.complete = true;
+    if (state.activeTab === "installed")
+      refreshSweepHead(state);
     return;
   }
-  state.shell.setBusy(false);
-  if (state.updates !== cache)
+  if (state.sweep !== sweep)
     return;
-  cache.total = names.length;
+  sweep.total = names.length;
   if (names.length === 0) {
-    cache.complete = true;
-    paintUpdatesTab(state);
+    sweep.complete = true;
+    if (state.activeTab === "installed")
+      repaintUpdateStatuses(state);
     return;
   }
-  paintUpdatesTab(state);
+  if (state.activeTab === "installed")
+    refreshSweepHead(state);
   let cursor = 0;
   const worker = async () => {
     while (cursor < names.length) {
@@ -1622,19 +1601,29 @@ async function checkUpdates(state) {
           incoming: []
         };
       }
-      if (state.updates !== cache)
+      if (state.sweep !== sweep)
         return;
-      cache.results.push(info);
-      if (state.activeTab === "updates")
-        repaintUpdatesList(state);
+      sweep.results.set(name, info);
+      if (state.activeTab === "installed") {
+        patchRow(state, name);
+        refreshSweepHead(state);
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()));
-  if (state.updates !== cache)
+  if (state.sweep !== sweep)
     return;
-  cache.complete = true;
-  if (state.activeTab === "updates")
-    repaintUpdatesList(state);
+  sweep.complete = true;
+  if (state.activeTab === "installed")
+    repaintUpdateStatuses(state);
+}
+function repaintUpdateStatuses(state) {
+  for (const [name, row] of state.rowByName) {
+    const pack = state.installed.find((p) => p.name === name);
+    if (pack)
+      applyUpdateStatus(state, row, pack);
+  }
+  refreshSweepHead(state);
 }
 async function renderInstallTab(state) {
   const section = resetBody(state);
@@ -1716,7 +1705,7 @@ async function doInstall(state, url, ref) {
       body.ref = ref.trim();
     const res = await apiPost("install", body);
     markRestartPending(state);
-    state.updates = null;
+    state.sweep = null;
     const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
     toast(level, `Installed ${res.name}`, depsToastDetail(res.deps));
     await renderInstalledTab(state);
@@ -1861,7 +1850,7 @@ async function doRegistryInstall(state, node, version) {
       body.version = version;
     const res = await apiPost("registry/install", body);
     markRestartPending(state);
-    state.updates = null;
+    state.sweep = null;
     const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
     toast(level, `Installed ${res.name}${res.version ? `@${res.version}` : ""}`, depsToastDetail(res.deps));
     state.shell.setBusy(false);

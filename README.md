@@ -8,11 +8,11 @@ Touch-first node/extension manager for ComfyUI: check updates, update nodes and 
 > touch-friendly HTML modals that replace clunky native LiteGraph
 > controls, detected by widget name, additive and non-clobbering.
 
-![Touch Node Manager — Updates tab](docs/manager.png)
+![Touch Node Manager — Installed tab](docs/manager.png)
 
-*The Updates tab: each git-backed pack fetched and compared against its
-tracked branch, with the incoming commits previewed and a one-tap Update.
-(Screenshot uses representative data.)*
+*The Installed tab: every pack with its git ref, and each git-backed pack's
+available update lazy-loaded inline — the incoming commits previewed and a
+one-tap Update. (Screenshot uses representative data.)*
 
 ## Install
 
@@ -32,15 +32,16 @@ A full-screen, touch-first modal for managing custom-node packs from the
 ComfyUI canvas — opened from a top action-bar button, the command palette
 ("Touch Node Manager"), the Extensions menu, or an optional sidebar tab. It's
 built for phones and tablets: big tap targets, 16px inputs (no iOS zoom),
-momentum scroll, and a fuzzy filter on every list. Five tabs:
+momentum scroll, and a fuzzy filter on every list. Four tabs:
 
 - **Installed** — every pack across all `custom_nodes` roots, with its current
   git ref, whether it has local changes, and its remote. Per-pack **Update**,
-  **Versions**, and **Uninstall** actions. Fuzzy search by name.
-- **Updates** — fetches each git-backed pack's remote (streamed, a few at a
-  time) and compares it against the tracked branch, listing the packs that are
-  behind with a preview of the incoming commits and a one-tap **Update**.
-  Results are cached, so updating one pack doesn't re-check every remote.
+  **Versions**, and **Uninstall** actions. Fuzzy search by name. The list paints
+  instantly; a background sweep then fetches each git-backed pack's remote (a few
+  at a time) and fills its **available update** inline on the row — the incoming
+  commits previewed and the Update button emphasized. Results are cached, so
+  updating one pack doesn't re-check every remote; a **Re-check updates** button
+  reruns the sweep on demand.
 - **Install URL** — paste a GitHub/GitLab URL to clone a pack into
   `custom_nodes`. Gated by the server's bind policy (loopback by default; a
   non-loopback bind requires the `TOUCH_MANAGER_ALLOW_REMOTE_INSTALL` server

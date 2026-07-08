@@ -4,10 +4,11 @@
 // command. It renders data from the /touch_manager/* backend routes into a
 // tabbed modal built on @laurigates/comfy-modal-kit's `openModalShell`.
 //
-// Tabs: Installed (fuzzy list + per-pack Update/Versions/Uninstall),
-// Updates (progressive per-pack check with live progress), Install (paste a
-// github/gitlab URL — gated by the backend bind policy), Registry (search +
-// install from registry.comfy.org, git or registry version), Core (core repo
+// Tabs: Installed (fuzzy list + per-pack Update/Versions/Uninstall; the list
+// paints instantly and a background sweep lazily fills each git pack's
+// available-update info into its row), Install (paste a github/gitlab URL —
+// gated by the backend bind policy), Registry (search + install from
+// registry.comfy.org, git or registry version), Core (core repo
 // ref + behind + update). After any mutating action the modal shows a prominent
 // "Restart ComfyUI to apply" notice with an optional one-tap restart (the
 // backend reboot gate decides whether it is offered).
@@ -30,7 +31,6 @@ import {
   filterPacks,
   formatCoreBehind,
   formatDepsResult,
-  formatProgress,
   formatRef,
   formatRegistryMeta,
   formatUpdateStatus,
@@ -171,8 +171,11 @@ const CSS = `
 .tm-badge-git { background: rgba(40,90,160,0.25); }
 .tm-badge-registry { background: rgba(120,60,160,0.25); }
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
-.tm-updates-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.tm-updates-head .tm-row-meta { margin-left: auto; }
+.tm-installed-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 2px; }
+.tm-installed-head .tm-sweep-label { margin-left: auto; }
+.tm-row.tm-has-update { border-color: rgba(200,150,20,0.7); }
+.tm-update-status { display: flex; flex-direction: column; gap: 2px; }
+.tm-update-status .tm-update-available { color: #e2b23a; font-weight: 600; }
 .cmp-match { text-decoration: underline; }
 `;
 
@@ -229,16 +232,21 @@ function restartBanner(state: ManagerState): HTMLElement {
 // Manager modal
 // ============================================================
 
-type TabId = "installed" | "updates" | "install" | "registry" | "core";
+type TabId = "installed" | "install" | "registry" | "core";
 
 /**
- * Cached result of an Updates-tab "Check for updates" sweep. Holding this in
- * state means revisiting the tab — or updating ONE pack from the list —
- * doesn't re-fetch every git remote again. `checkedAt` drives a "last checked"
- * label; `complete` distinguishes an in-progress sweep from a finished one.
+ * A background update sweep, run lazily behind the Installed list. The list
+ * paints instantly from /installed; this fetches each git pack's remote (bounded
+ * concurrency) and fills `results` per pack name, patching the matching row in
+ * place as each check lands. Held on the state so switching tabs and returning —
+ * or updating ONE pack — doesn't re-fetch every remote. `token` is the identity
+ * guard: a superseded worker (re-check, or a pack-set change) bails instead of
+ * scribbling into a newer sweep. `complete` distinguishes in-progress from done.
  */
-interface UpdatesCache {
-  results: UpdateCheckResult[];
+interface UpdatesSweep {
+  token: object;
+  /** Per-pack check results, keyed by pack name. */
+  results: Map<string, UpdateCheckResult>;
   total: number;
   checkedAt: number;
   complete: boolean;
@@ -250,12 +258,12 @@ interface ManagerState {
   installed: InstalledPack[];
   activeTab: TabId;
   restartPending: boolean;
-  /** Cached update-check sweep, or null until the first check. */
-  updates: UpdatesCache | null;
-  /** Per-tab filter text, so switching tabs doesn't leak one query into another. */
-  search: { installed: string; updates: string };
-  /** Saved Updates-list scroll offset, restored on tab re-entry. */
-  updatesScroll: number;
+  /** Background update sweep, or null until it is (re)started. */
+  sweep: UpdatesSweep | null;
+  /** Installed-list filter text (survives tab switches). */
+  search: { installed: string };
+  /** Live map of pack name → its rendered row, for O(1) in-place patching. */
+  rowByName: Map<string, HTMLElement>;
 }
 
 /** Open the Touch Node Manager modal. Safe to call repeatedly. */
@@ -282,16 +290,15 @@ export function openManager(): void {
     installed: [],
     activeTab: "installed",
     restartPending: false,
-    updates: null,
-    search: { installed: "", updates: "" },
-    updatesScroll: 0,
+    sweep: null,
+    search: { installed: "" },
+    rowByName: new Map(),
   };
 
   // Tab bar lives in the shell toolbar row.
   const tabBar = el("div", "tm-tabs");
   const tabs: Array<{ id: TabId; label: string }> = [
     { id: "installed", label: "Installed" },
-    { id: "updates", label: "Updates" },
     { id: "install", label: "Install URL" },
     { id: "registry", label: "Registry" },
     { id: "core", label: "Core" },
@@ -307,25 +314,19 @@ export function openManager(): void {
   shell.toolbarEl.appendChild(tabBar);
 
   function selectTab(id: TabId): void {
-    // Leaving the Updates tab: remember where the list was scrolled to.
-    if (state.activeTab === "updates") state.updatesScroll = shell.bodyEl.scrollTop;
     state.activeTab = id;
     for (const [tid, b] of tabButtons) b.classList.toggle("tm-active", tid === id);
-    // Restore the active tab's own query into the shared search box so a filter
-    // typed on one tab doesn't bleed into another.
+    // Restore the active tab's own query into the shared search box.
     syncSearch(state);
     shell.setStatus("");
     void renderActiveTab(state, id);
   }
 
-  // Wire the shell search to re-filter whichever filterable tab is active.
+  // Wire the shell search to re-filter the Installed list (the only filterable tab).
   shell.searchEl.addEventListener("input", () => {
     if (state.activeTab === "installed") {
       state.search.installed = shell.searchEl.value;
       renderInstalledList(state);
-    } else if (state.activeTab === "updates") {
-      state.search.updates = shell.searchEl.value;
-      repaintUpdatesList(state);
     }
   });
 
@@ -349,8 +350,6 @@ async function renderActiveTab(state: ManagerState, id: TabId): Promise<void> {
   switch (id) {
     case "installed":
       return renderInstalledTab(state);
-    case "updates":
-      return renderUpdatesTab(state);
     case "install":
       return renderInstallTab(state);
     case "registry":
@@ -370,22 +369,17 @@ function resetBody(state: ManagerState): HTMLElement {
 }
 
 /**
- * Show the shared search row only where there's something to filter — the
- * Installed list, or the Updates list once a sweep is cached — and restore that
- * tab's own query + placeholder. Filtering an empty "Check for updates" prompt
- * would just look broken, so the box stays hidden there until results exist.
+ * Show the shared search row only on the Installed tab — the one filterable
+ * list — and restore its query + placeholder. It stays hidden on the
+ * Install/Registry/Core tabs, which have nothing to filter.
  */
 function syncSearch(state: ManagerState): void {
   const onInstalled = state.activeTab === "installed";
-  const onUpdates = state.activeTab === "updates" && state.updates != null;
   const row = state.shell.searchEl.parentElement;
-  if (row) row.style.display = onInstalled || onUpdates ? "" : "none";
+  if (row) row.style.display = onInstalled ? "" : "none";
   if (onInstalled) {
     state.shell.searchEl.placeholder = "Filter installed packs…";
     state.shell.searchEl.value = state.search.installed;
-  } else if (onUpdates) {
-    state.shell.searchEl.placeholder = "Filter updates…";
-    state.shell.searchEl.value = state.search.updates;
   }
 }
 
@@ -416,14 +410,21 @@ async function renderInstalledTab(state: ManagerState): Promise<void> {
     state.shell.setBusy(false);
   }
   renderInstalledList(state);
+  // The list is up; lazily fill in each git pack's available-update info in the
+  // background. Only kick a fresh sweep when there isn't one already (in-flight
+  // or cached) — revisiting the tab reuses the previous results.
+  if (!state.sweep) void startUpdateSweep(state);
 }
 
 function renderInstalledList(state: ManagerState): void {
   const section = resetBody(state);
+  section.appendChild(installedHead(state));
+
   const query = state.shell.searchEl.value;
   const ranked = filterPacks(query, state.installed);
   state.shell.setStatus(`${ranked.length}/${state.installed.length}`);
 
+  state.rowByName = new Map();
   if (ranked.length === 0) {
     section.appendChild(
       emptyState(state.installed.length === 0 ? "No packs found." : "No matches."),
@@ -433,9 +434,35 @@ function renderInstalledList(state: ManagerState): void {
 
   const list = el("div", "tm-list");
   for (const { pack, primaryMatches } of ranked) {
-    list.appendChild(installedRow(state, pack, primaryMatches));
+    const row = installedRow(state, pack, primaryMatches);
+    state.rowByName.set(pack.name, row);
+    list.appendChild(row);
   }
   section.appendChild(list);
+}
+
+/**
+ * The Installed-list header: a Re-check button plus a label reflecting the
+ * background sweep (checking N/M, "X updates available", or "All up to date").
+ */
+function installedHead(state: ManagerState): HTMLElement {
+  const head = el("div", "tm-installed-head");
+  const sweeping = !!state.sweep && !state.sweep.complete;
+  const recheck = button("Re-check updates", "", () => void startUpdateSweep(state));
+  recheck.disabled = sweeping;
+  head.appendChild(recheck);
+  head.appendChild(el("div", "tm-row-meta tm-sweep-label", sweepLabel(state)));
+  return head;
+}
+
+/** Short summary of the background sweep for the Installed-list header. */
+function sweepLabel(state: ManagerState): string {
+  const s = state.sweep;
+  if (!s) return "";
+  if (!s.complete) return `Checking for updates… ${s.results.size}/${s.total}`;
+  const { actionable } = partitionUpdateResults([...s.results.values()]);
+  if (actionable.length === 0) return "All up to date";
+  return `${actionable.length} update${actionable.length === 1 ? "" : "s"} available`;
 }
 
 function installedRow(state: ManagerState, pack: InstalledPack, matches: number[]): HTMLElement {
@@ -456,12 +483,15 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
   if (pack.remote_url) row.appendChild(el("div", "tm-row-meta", pack.remote_url));
 
+  // Container the background sweep fills in place once this pack is checked.
+  row.appendChild(el("div", "tm-update-status"));
+
   const actions = el("div", "tm-row-actions");
   const gitDisabledReason = pack.is_git ? "" : "not a git repo";
 
   const updateBtn = button(
     "Update",
-    "",
+    "tm-update-btn",
     () => void doUpdate(state, pack.name, { origin: "installed" }),
   );
   updateBtn.disabled = !pack.is_git;
@@ -480,7 +510,52 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   }
 
   row.appendChild(actions);
+  // Reflect any already-known (or in-progress) update info for this pack.
+  applyUpdateStatus(state, row, pack);
   return row;
+}
+
+/**
+ * Render the update-status portion of an Installed row from the current sweep:
+ * a "checking…" hint while the sweep is still running, an "update available"
+ * line (with the incoming-commit preview and an emphasized Update button) when
+ * the pack is behind, a subtle "up to date" / "check failed" otherwise. Called
+ * both when a row is first built and each time a background check lands.
+ */
+function applyUpdateStatus(state: ManagerState, row: HTMLElement, pack: InstalledPack): void {
+  const status = row.querySelector<HTMLElement>(".tm-update-status");
+  const updateBtn = row.querySelector<HTMLButtonElement>(".tm-update-btn");
+  if (!status) return;
+  status.replaceChildren();
+  row.classList.remove("tm-has-update");
+  updateBtn?.classList.remove("tm-btn-primary");
+
+  if (!pack.is_git) return; // non-git packs are never part of the sweep
+
+  const info = state.sweep?.results.get(pack.name);
+  if (!info) {
+    // Not checked yet: show a hint only while a sweep is actually running.
+    if (state.sweep && !state.sweep.complete) {
+      status.appendChild(el("div", "tm-row-meta", "checking for updates…"));
+    }
+    return;
+  }
+
+  if (info.error) {
+    status.appendChild(el("div", "tm-row-meta", `update check failed: ${info.error}`));
+    return;
+  }
+  if (info.update_available) {
+    row.classList.add("tm-has-update");
+    updateBtn?.classList.add("tm-btn-primary");
+    status.appendChild(el("div", "tm-row-meta tm-update-available", formatUpdateStatus(info)));
+    for (const c of info.incoming) {
+      status.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
+    }
+    return;
+  }
+  // Up to date: leave the row clean. The header's count is the summary; a
+  // per-row "up to date" line on every current pack would just be noise.
 }
 
 interface UpdateOptions {
@@ -490,10 +565,9 @@ interface UpdateOptions {
   origin?: TabId;
 }
 
-/** Drop a pack from the cached updates sweep (it is now at its target). */
+/** Drop a pack from the cached update sweep (it is now at its target). */
 function removeFromUpdatesCache(state: ManagerState, name: string): void {
-  if (!state.updates) return;
-  state.updates.results = state.updates.results.filter((r) => r.name !== name);
+  state.sweep?.results.delete(name);
 }
 
 /**
@@ -537,13 +611,11 @@ async function doUpdate(
       `Updated ${name}`,
       deps ? `${formatUpdateSummary(result)} — ${deps.text}` : formatUpdateSummary(result),
     );
-    // Stay in the list the action came from: repaint it in place (the row
-    // drops off Updates / refreshes on Installed) instead of navigating to a
-    // separate result panel. A Versions checkout has no origin — the picker
-    // stays open for further checkouts.
-    if (opts.origin === "updates") {
-      repaintUpdatesList(state);
-    } else if (opts.origin === "installed") {
+    // Stay in the list the action came from: refresh the Installed list in
+    // place (the row re-renders with its new ref and drops its update badge)
+    // instead of navigating to a separate result panel. A Versions checkout has
+    // no origin — the picker stays open for further checkouts.
+    if (opts.origin === "installed") {
       await refreshInstalledList(state);
     }
   } catch (e) {
@@ -568,7 +640,7 @@ async function doUninstall(state: ManagerState, name: string): Promise<void> {
     await apiPost("uninstall", { name });
     markRestartPending(state);
     // The pack set changed — the cached updates sweep is now stale.
-    state.updates = null;
+    state.sweep = null;
     toast("success", `Disabled ${name}`, "Restart ComfyUI to apply.");
     await renderInstalledTab(state);
   } catch (e) {
@@ -661,205 +733,76 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
 }
 
 // ============================================================
-// Updates tab
+// Background update sweep (feeds the Installed list)
 //
-// A "Check for updates" sweep is CACHED on the state. Revisiting the tab
-// repaints the cached results instead of re-fetching every git remote, and
-// updating a pack repaints the list in place (the row simply drops off). The
-// list is filterable (shared search box) and its scroll offset is restored on
-// tab re-entry.
+// The Installed list paints instantly from /installed; this sweep then fetches
+// each git pack's remote (bounded concurrency) and fills its per-pack
+// available-update info into the matching row IN PLACE — no reorder, no full
+// repaint, so the list never jumps under the user. Results are cached on the
+// state (keyed by pack name), so switching tabs and returning — or updating one
+// pack — reuses them instead of re-fetching every remote. `sweep.token` is the
+// identity guard: a superseded worker (re-check, or a pack-set change that
+// nulls the sweep) bails rather than scribbling into a newer sweep.
 // ============================================================
-
-/** Short "Last checked HH:MM" label from a cache timestamp. */
-function lastCheckedLabel(cache: UpdatesCache): string {
-  const t = new Date(cache.checkedAt);
-  const hh = String(t.getHours()).padStart(2, "0");
-  const mm = String(t.getMinutes()).padStart(2, "0");
-  return `Last checked ${hh}:${mm}`;
-}
-
-async function renderUpdatesTab(state: ManagerState): Promise<void> {
-  // No sweep cached yet → the initial prompt.
-  if (!state.updates) {
-    const section = resetBody(state);
-    section.appendChild(
-      button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)),
-    );
-    section.appendChild(
-      el(
-        "div",
-        "tm-note tm-note-info",
-        "Fetches each git pack's remote and compares against the tracked branch. " +
-          "Results are cached — update a pack and come back without re-checking everything.",
-      ),
-    );
-    return;
-  }
-  // Cache present → repaint it (filtered), restoring the saved scroll offset.
-  paintUpdatesTab(state);
-  restoreUpdatesScroll(state);
-}
-
-/** Restore the saved Updates-list scroll offset after the next layout. */
-function restoreUpdatesScroll(state: ManagerState): void {
-  const top = state.updatesScroll;
-  if (top <= 0) return;
-  requestAnimationFrame(() => {
-    state.shell.bodyEl.scrollTop = top;
-  });
-}
-
-/** A single Updates-tab row for a pack with an available update. */
-function updateRow(
-  state: ManagerState,
-  info: UpdateCheckResult,
-  matches: number[] = [],
-): HTMLElement {
-  const r = el("div", "tm-row");
-  const title = el("div", "tm-row-title");
-  title.appendChild(highlightMatches(info.name, matches));
-  r.appendChild(title);
-  r.appendChild(el("div", "tm-row-meta", formatUpdateStatus(info)));
-  for (const c of info.incoming) {
-    r.appendChild(el("div", "tm-row-meta", `${c.sha} ${c.subject}`));
-  }
-  const actions = el("div", "tm-row-actions");
-  actions.appendChild(
-    button(
-      "Update",
-      "tm-btn-primary",
-      () => void doUpdate(state, info.name, { origin: "updates" }),
-    ),
-  );
-  r.appendChild(actions);
-  return r;
-}
-
-/**
- * Lay out the static structure of a cache-backed Updates tab once: a head
- * (Re-check + last-checked label), the list container, and the errors block.
- * `repaintUpdatesList` fills the dynamic parts and is also what streaming and
- * filtering call — so neither resets body scroll.
- */
-function paintUpdatesTab(state: ManagerState): void {
-  if (!state.updates) return;
-  const section = resetBody(state);
-  section.appendChild(el("div", "tm-updates-head"));
-  section.appendChild(el("div", "tm-list tm-updates-list"));
-  section.appendChild(el("div", "tm-section tm-updates-errors"));
-  // A cache now exists — reveal the filter box if we're on the Updates tab.
-  syncSearch(state);
-  repaintUpdatesList(state);
-}
-
-/**
- * Repaint the head, list, errors, and status from the cached sweep applying the
- * current filter. Only the inner containers are replaced — body scroll is left
- * untouched, so this is safe to call on every streamed result and keystroke.
- */
-function repaintUpdatesList(state: ManagerState): void {
-  const cache = state.updates;
-  if (!cache) return;
-  const body = state.shell.bodyEl;
-  const head = body.querySelector<HTMLElement>(".tm-updates-head");
-  const list = body.querySelector<HTMLElement>(".tm-updates-list");
-  const errorsWrap = body.querySelector<HTMLElement>(".tm-updates-errors");
-  if (!head || !list) return;
-
-  // Head: Re-check (disabled mid-sweep) + a last-checked / progress label.
-  head.replaceChildren();
-  const recheck = button("Re-check", "tm-btn-primary", () => void checkUpdates(state));
-  recheck.disabled = !cache.complete;
-  head.appendChild(recheck);
-  head.appendChild(
-    el("div", "tm-row-meta", cache.complete ? lastCheckedLabel(cache) : "checking…"),
-  );
-
-  const { actionable, errored } = partitionUpdateResults(cache.results);
-  // Fuzzy-filter the actionable rows by pack name (reusing the installed-list
-  // ranker), carrying match indices for highlighting.
-  const ranked = filterPacks(state.search.updates, actionable);
-
-  list.replaceChildren();
-  for (const { pack, primaryMatches } of ranked) {
-    list.appendChild(updateRow(state, pack, primaryMatches));
-  }
-  if (ranked.length === 0) {
-    const message =
-      actionable.length > 0
-        ? "No matches."
-        : cache.complete
-          ? "Everything is up to date."
-          : "Checking…";
-    list.appendChild(emptyState(message));
-  }
-
-  if (errorsWrap) {
-    errorsWrap.replaceChildren();
-    if (errored.length > 0) {
-      errorsWrap.appendChild(el("div", "tm-field-label", "Could not check"));
-      for (const e of errored) {
-        errorsWrap.appendChild(el("div", "tm-row-meta", `${e.name}: ${e.error}`));
-      }
-    }
-  }
-
-  // Status: live progress while sweeping, otherwise a filtered/total count.
-  state.shell.setStatus(
-    cache.complete
-      ? `${ranked.length}/${actionable.length}`
-      : formatProgress(cache.results.length, cache.total),
-  );
-}
 
 // How many per-pack checks run concurrently. Small, so a long fetch can't stall
 // the whole sweep while still bounding the load on the git remotes.
 const UPDATE_CHECK_CONCURRENCY = 3;
 
-/**
- * Progressive update check: fetch the git-pack names fast, then check each pack
- * (bounded concurrency), streaming results into the cached sweep and repainting
- * the list as they arrive. The cache is keyed by object identity — if the user
- * starts another sweep (or navigates away and back), the superseded worker bails
- * rather than scribbling into the new cache.
- */
-async function checkUpdates(state: ManagerState): Promise<void> {
-  // Begin a fresh sweep. A new cache object also acts as the identity guard.
-  const cache: UpdatesCache = { results: [], total: 0, checkedAt: Date.now(), complete: false };
-  state.updates = cache;
-  // A re-check from a filtered view shouldn't keep the stale filter visible
-  // results jumping — reset the saved scroll so the fresh sweep starts at top.
-  state.updatesScroll = 0;
+/** Repaint the Installed head (sweep label + Re-check enabled state) in place. */
+function refreshSweepHead(state: ManagerState): void {
+  const body = state.shell.bodyEl;
+  const label = body.querySelector<HTMLElement>(".tm-sweep-label");
+  if (label) label.textContent = sweepLabel(state);
+  const recheck = body.querySelector<HTMLButtonElement>(".tm-installed-head .tm-btn");
+  if (recheck) recheck.disabled = !!state.sweep && !state.sweep.complete;
+}
 
-  const section = resetBody(state);
-  section.appendChild(emptyState("Listing git-backed packs…"));
-  state.shell.setBusy(true);
+/** Patch a single pack's row from the latest sweep result, if it is rendered. */
+function patchRow(state: ManagerState, name: string): void {
+  const row = state.rowByName.get(name);
+  if (!row) return;
+  const pack = state.installed.find((p) => p.name === name);
+  if (pack) applyUpdateStatus(state, row, pack);
+}
+
+/**
+ * Start (or restart) the background update sweep: fetch the git-pack names fast,
+ * then check each pack with bounded concurrency, streaming each result into the
+ * cached sweep and patching the matching Installed row as it lands. Safe to call
+ * fire-and-forget; a fresh `token` supersedes any in-flight sweep.
+ */
+async function startUpdateSweep(state: ManagerState): Promise<void> {
+  const sweep: UpdatesSweep = {
+    token: {},
+    results: new Map(),
+    total: 0,
+    checkedAt: Date.now(),
+    complete: false,
+  };
+  state.sweep = sweep;
+  if (state.activeTab === "installed") repaintUpdateStatuses(state);
 
   let names: string[];
   try {
     const data = await apiGet<{ packs: UpdatesListEntry[] }>("updates/list");
     names = (data.packs ?? []).map((p) => p.name);
-  } catch (e) {
-    state.shell.setBusy(false);
-    if (state.updates !== cache) return; // superseded
-    state.updates = null;
-    const s = resetBody(state);
-    s.appendChild(button("Check for updates", "tm-btn-primary", () => void checkUpdates(state)));
-    s.appendChild(emptyState(`Failed: ${(e as Error).message}`));
+  } catch {
+    if (state.sweep !== sweep) return; // superseded
+    sweep.complete = true; // give up quietly; rows keep their base info
+    if (state.activeTab === "installed") refreshSweepHead(state);
     return;
   }
-  state.shell.setBusy(false);
-  if (state.updates !== cache) return; // superseded while listing
+  if (state.sweep !== sweep) return; // superseded while listing
 
-  cache.total = names.length;
+  sweep.total = names.length;
   if (names.length === 0) {
-    cache.complete = true;
-    paintUpdatesTab(state);
+    sweep.complete = true;
+    if (state.activeTab === "installed") repaintUpdateStatuses(state);
     return;
   }
-
-  // Lay out the cache-backed tab; workers repaint it as results stream in.
-  paintUpdatesTab(state);
+  // The real pack count is known now — reflect it in the header before checking.
+  if (state.activeTab === "installed") refreshSweepHead(state);
 
   let cursor = 0;
   const worker = async (): Promise<void> => {
@@ -879,9 +822,12 @@ async function checkUpdates(state: ManagerState): Promise<void> {
           incoming: [],
         };
       }
-      if (state.updates !== cache) return; // a newer sweep took over
-      cache.results.push(info);
-      if (state.activeTab === "updates") repaintUpdatesList(state);
+      if (state.sweep !== sweep) return; // a newer sweep took over
+      sweep.results.set(name, info);
+      if (state.activeTab === "installed") {
+        patchRow(state, name);
+        refreshSweepHead(state);
+      }
     }
   };
 
@@ -889,9 +835,18 @@ async function checkUpdates(state: ManagerState): Promise<void> {
     Array.from({ length: Math.min(UPDATE_CHECK_CONCURRENCY, names.length) }, () => worker()),
   );
 
-  if (state.updates !== cache) return; // superseded
-  cache.complete = true;
-  if (state.activeTab === "updates") repaintUpdatesList(state);
+  if (state.sweep !== sweep) return; // superseded
+  sweep.complete = true;
+  if (state.activeTab === "installed") repaintUpdateStatuses(state);
+}
+
+/** Re-apply the sweep's status to every rendered row and refresh the head. */
+function repaintUpdateStatuses(state: ManagerState): void {
+  for (const [name, row] of state.rowByName) {
+    const pack = state.installed.find((p) => p.name === name);
+    if (pack) applyUpdateStatus(state, row, pack);
+  }
+  refreshSweepHead(state);
 }
 
 // ============================================================
@@ -1015,7 +970,7 @@ async function doInstall(state: ManagerState, url: string, ref: string): Promise
     if (ref.trim()) body.ref = ref.trim();
     const res = await apiPost<InstallResult>("install", body);
     markRestartPending(state);
-    state.updates = null;
+    state.sweep = null;
     const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
     toast(level, `Installed ${res.name}`, depsToastDetail(res.deps));
     // Refresh installed list and switch to it.
@@ -1226,7 +1181,7 @@ async function doRegistryInstall(
     if (version) body.version = version;
     const res = await apiPost<RegistryInstallResult>("registry/install", body);
     markRestartPending(state);
-    state.updates = null;
+    state.sweep = null;
     const level = res.deps.attempted && res.deps.ok === false ? "warn" : "success";
     toast(
       level,

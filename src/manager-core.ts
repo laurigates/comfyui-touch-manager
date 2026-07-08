@@ -294,6 +294,44 @@ export interface CoreInfo {
 }
 
 // ============================================================
+// Reconnect-after-restart polling
+// ============================================================
+
+/**
+ * Timing for the post-restart reconnect poll (see watchForReconnect in the UI).
+ * `graceMs` gives the process a beat to be replaced by os.execv before the first
+ * probe (so we never see the OUTGOING server answer). `timeoutMs` is generous —
+ * a heavy ComfyUI can take 30s+ to re-import every custom node before its HTTP
+ * surface (and thus our /config route) answers again.
+ */
+export const RECONNECT_POLL = {
+  graceMs: 1500,
+  intervalMs: 2000,
+  timeoutMs: 120000,
+  countdownSeconds: 3,
+} as const;
+
+/** True once the reconnect poll has run past its timeout budget. */
+export function reconnectExpired(
+  elapsedMs: number,
+  timeoutMs: number = RECONNECT_POLL.timeoutMs,
+): boolean {
+  return elapsedMs >= timeoutMs;
+}
+
+/** Status line for the "waiting for the server to come back" restart view. */
+export function formatReconnectStatus(
+  elapsedMs: number,
+  timeoutMs: number = RECONNECT_POLL.timeoutMs,
+): string {
+  if (reconnectExpired(elapsedMs, timeoutMs)) {
+    return "ComfyUI is taking longer than expected to come back — reload when it is ready.";
+  }
+  const secs = Math.max(0, Math.floor(elapsedMs / 1000));
+  return `Waiting for ComfyUI to come back… (${secs}s)`;
+}
+
+// ============================================================
 // Install-URL validation — mirror of the backend gate
 // ============================================================
 

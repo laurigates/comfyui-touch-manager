@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.11...comfyui-touch-manager-v0.1.12) (2026-07-08)
+
+
+### Features
+
+* **installed:** fold Updates tab into Installed with lazy background update checks ([#36](https://github.com/laurigates/comfyui-touch-manager/issues/36)) ([94a61fd](https://github.com/laurigates/comfyui-touch-manager/commit/94a61fdb61e4e683c209fafc34f6946b779b774a))
+
 ## [0.1.11](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.10...comfyui-touch-manager-v0.1.11) (2026-07-06)
 
 

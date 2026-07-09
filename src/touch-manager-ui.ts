@@ -478,8 +478,11 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
 
   const metaBits: string[] = [];
   if (pack.is_git) metaBits.push(formatRef(pack.ref));
-  else metaBits.push("not a git repo");
+  else if (pack.source === "registry") {
+    metaBits.push(`registry pack${pack.installed_version ? ` v${pack.installed_version}` : ""}`);
+  } else metaBits.push("not a git repo");
   if (pack.dirty) metaBits.push("local changes");
+  if (pack.author) metaBits.push(`by ${pack.author}`);
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
   if (pack.remote_url) row.appendChild(el("div", "tm-row-meta", pack.remote_url));
 
@@ -487,20 +490,22 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   row.appendChild(el("div", "tm-update-status"));
 
   const actions = el("div", "tm-row-actions");
-  const gitDisabledReason = pack.is_git ? "" : "not a git repo";
+  // Update covers git packs (fetch/checkout) and registry-installed packs
+  // (re-download); the branches/tags/releases Versions picker is git-only.
+  const updatable = pack.is_git || pack.source === "registry";
 
   const updateBtn = button(
     "Update",
     "tm-update-btn",
     () => void doUpdate(state, pack.name, { origin: "installed" }),
   );
-  updateBtn.disabled = !pack.is_git;
-  if (gitDisabledReason) updateBtn.title = gitDisabledReason;
+  updateBtn.disabled = !updatable;
+  if (!updatable) updateBtn.title = "not a git repo or registry-installed pack";
   actions.appendChild(updateBtn);
 
   const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
   versionsBtn.disabled = !pack.is_git;
-  if (gitDisabledReason) versionsBtn.title = gitDisabledReason;
+  if (!pack.is_git) versionsBtn.title = "not a git repo";
   actions.appendChild(versionsBtn);
 
   if (pack.enabled) {
@@ -530,7 +535,7 @@ function applyUpdateStatus(state: ManagerState, row: HTMLElement, pack: Installe
   row.classList.remove("tm-has-update");
   updateBtn?.classList.remove("tm-btn-primary");
 
-  if (!pack.is_git) return; // non-git packs are never part of the sweep
+  if (!pack.is_git && pack.source !== "registry") return; // not part of the sweep
 
   const info = state.sweep?.results.get(pack.name);
   if (!info) {
@@ -815,11 +820,13 @@ async function startUpdateSweep(state: ManagerState): Promise<void> {
       } catch (e) {
         info = {
           name,
+          source: "unknown",
           update_available: false,
           behind: 0,
           ahead: 0,
           error: (e as Error).message,
           incoming: [],
+          latest_version: null,
         };
       }
       if (state.sweep !== sweep) return; // a newer sweep took over

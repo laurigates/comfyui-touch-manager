@@ -35,13 +35,16 @@ built for phones and tablets: big tap targets, 16px inputs (no iOS zoom),
 momentum scroll, and a fuzzy filter on every list. Four tabs:
 
 - **Installed** — every pack across all `custom_nodes` roots, with its current
-  git ref, whether it has local changes, and its remote. Per-pack **Update**,
-  **Versions**, and **Uninstall** actions. Fuzzy search by name. The list paints
-  instantly; a background sweep then fetches each git-backed pack's remote (a few
-  at a time) and fills its **available update** inline on the row — the incoming
-  commits previewed and the Update button emphasized. Results are cached, so
-  updating one pack doesn't re-check every remote; a **Re-check updates** button
-  reruns the sweep on demand.
+  git ref (or registry version), its author, whether it has local changes, and
+  its remote. Per-pack **Update**, **Versions**, and **Uninstall** actions —
+  **Update** works for both git-backed packs (fetch + fast-forward) and packs
+  installed from the Comfy Registry (re-downloads the latest published
+  version). Fuzzy search by name, author, or remote URL. The list paints
+  instantly; a background sweep then checks each updatable pack (a few at a
+  time) — a git fetch, or a registry version comparison — and fills its
+  **available update** inline on the row. Results are cached, so updating one
+  pack doesn't re-check everything; a **Re-check updates** button reruns the
+  sweep on demand.
 - **Install URL** — paste a GitHub/GitLab URL to clone a pack into
   `custom_nodes`. Gated by the server's bind policy (loopback by default; a
   non-loopback bind requires the `TOUCH_MANAGER_ALLOW_REMOTE_INSTALL` server

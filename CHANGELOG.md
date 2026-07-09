@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.13](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.12...comfyui-touch-manager-v0.1.13) (2026-07-09)
+
+
+### Features
+
+* auto-reload the page after an in-app ComfyUI restart ([#38](https://github.com/laurigates/comfyui-touch-manager/issues/38)) ([a381480](https://github.com/laurigates/comfyui-touch-manager/commit/a381480cc177b1caa6a01fb125d57cd644532e50))
+* **installed:** match author in filters and update Registry-installed packs ([#39](https://github.com/laurigates/comfyui-touch-manager/issues/39)) ([36a1902](https://github.com/laurigates/comfyui-touch-manager/commit/36a1902fb43f510d2bc8dbe1bb29af868b110df6))
+
 ## [0.1.12](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.11...comfyui-touch-manager-v0.1.12) (2026-07-08)
 
 

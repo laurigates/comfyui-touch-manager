@@ -31,6 +31,7 @@ import {
   filterPacks,
   formatCoreBehind,
   formatDepsResult,
+  formatReconnectStatus,
   formatRef,
   formatRegistryMeta,
   formatUpdateStatus,
@@ -42,11 +43,13 @@ import {
   type ManagerConfig,
   mergeVersionEntries,
   partitionUpdateResults,
+  RECONNECT_POLL,
   type RegistryInstallResult,
   type RegistryNode,
   type RegistrySearchResult,
   type RegistryVersion,
   rebootPermitted,
+  reconnectExpired,
   type UpdateCheckResult,
   type UpdateResult,
   type UpdatesListEntry,
@@ -1262,42 +1265,150 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
   );
 }
 
+// ============================================================
+// Restart + reconnect-and-reload
+// ============================================================
+
 /**
- * Restart the ComfyUI server via the backend /reboot route. The process is
- * replaced by os.execv, so the POST typically never resolves (or errors as the
- * connection drops) — we treat a dropped request as "restart in progress". A
- * ManagerError means the backend refused (e.g. 403 reboot_disabled), which we
- * surface instead.
+ * Page reload, indirected through a mutable object so the jsdom test can spy on
+ * it without stubbing `window.location` (which jsdom refuses to reload).
+ */
+export const reloadController = {
+  reload(): void {
+    window.location.reload();
+  },
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Cheap "is the server answering yet?" probe against our OWN /config route.
+ * A 200 proves this pack re-imported (its routes are registered again), not
+ * merely that aiohttp is listening — so it is a stronger "fully back" signal
+ * than the socket reopening. Any network error or non-200 is treated as "still
+ * down". `no-store` avoids a cached 200 masking a still-restarting server.
+ */
+async function probeServer(): Promise<boolean> {
+  try {
+    const res = await app.api.fetchApi(app.api.apiURL("/touch_manager/config"), {
+      cache: "no-store",
+    });
+    return res.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/** A cancel handle so a refused reboot (403) can abort the watch mid-grace. */
+interface RestartWatch {
+  cancelled: boolean;
+}
+
+/**
+ * Once the server is back, count down (cancelable) and then reload so the page
+ * picks up the freshly-loaded nodes / bundles. A "Reload now" button reloads
+ * instantly; "Cancel" stops the countdown and leaves the choice to the user.
+ */
+function startReloadCountdown(status: HTMLElement, actions: HTMLElement): void {
+  let remaining = RECONNECT_POLL.countdownSeconds;
+  let cancelled = false;
+  const tick = (): void => {
+    if (cancelled) return;
+    if (remaining <= 0) {
+      reloadController.reload();
+      return;
+    }
+    status.textContent = `ComfyUI is back — reloading in ${remaining}…`;
+    remaining -= 1;
+    setTimeout(tick, 1000);
+  };
+  actions.replaceChildren();
+  actions.appendChild(
+    button("Reload now", "tm-btn-primary", () => {
+      cancelled = true;
+      reloadController.reload();
+    }),
+  );
+  actions.appendChild(
+    button("Cancel", "", () => {
+      cancelled = true;
+      status.textContent = "ComfyUI is back. Reload when you're ready.";
+    }),
+  );
+  tick();
+}
+
+/**
+ * Poll the server after a restart and auto-reload once it answers again.
+ * Builds the "Restarting…" view (live status + an always-available Reload now
+ * fallback), waits a grace period for os.execv to replace the process, then
+ * probes on an interval until the server returns or the timeout budget is
+ * spent. `watch.cancelled` lets a refused reboot abort the loop.
+ */
+async function watchForReconnect(state: ManagerState, watch: RestartWatch): Promise<void> {
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
+  const status = el("div", "tm-note tm-note-info", formatReconnectStatus(0));
+  section.appendChild(status);
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Reload now", "tm-btn-primary", () => reloadController.reload()));
+  section.appendChild(actions);
+
+  const start = Date.now();
+  await sleep(RECONNECT_POLL.graceMs);
+  while (!watch.cancelled && !reconnectExpired(Date.now() - start)) {
+    if (await probeServer()) {
+      if (watch.cancelled) return;
+      startReloadCountdown(status, actions);
+      return;
+    }
+    if (watch.cancelled) return;
+    status.textContent = formatReconnectStatus(Date.now() - start);
+    await sleep(RECONNECT_POLL.intervalMs);
+  }
+  if (!watch.cancelled) {
+    // Timed out — the "Reload now" button is already there; update the note.
+    status.textContent = formatReconnectStatus(RECONNECT_POLL.timeoutMs);
+  }
+}
+
+/**
+ * Restart the ComfyUI server via the backend /reboot route, then watch for it
+ * to come back and reload the page. The process is replaced by os.execv, so the
+ * POST typically never resolves (the connection drops) — we treat that as
+ * "restart in progress" and let the reconnect watch drive recovery. A
+ * ManagerError means the backend refused (e.g. 403 reboot_disabled): the server
+ * did NOT restart, so we cancel the watch and surface the error instead.
  */
 async function doReboot(state: ManagerState): Promise<void> {
   const ok = await confirmInShell(state.shell, {
     title: "Restart ComfyUI?",
     message:
-      "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+      "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable, then this page reloads automatically once it is back.",
     confirmLabel: "Restart now",
     danger: true,
     enterConfirms: true,
   });
   if (!ok) return;
-  toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
-  const section = resetBody(state);
-  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
-  section.appendChild(
-    el(
-      "div",
-      "tm-note tm-note-info",
-      "The server is restarting. This page will reconnect once it is back; reload if it does not.",
-    ),
-  );
+  toast("info", "Restarting ComfyUI…", "The page will reload automatically once it is back.", 8000);
+
+  // Start the reconnect watch immediately (its grace delay outlasts a fast 403
+  // refusal, so a cancel below still lands before the first probe).
+  const watch: RestartWatch = { cancelled: false };
+  void watchForReconnect(state, watch);
+
   try {
     await apiPost("reboot", {});
+    // A resolved POST is unusual (the process is normally gone before the
+    // response) — the watch confirms the server is actually back regardless.
   } catch (e) {
     if (e instanceof ManagerError) {
+      watch.cancelled = true;
       toast("error", "Restart failed", `${e.message}${e.code ? ` (${e.code})` : ""}`);
       await renderCoreTab(state);
     }
     // Otherwise the fetch dropped because the process was replaced mid-request
-    // (the expected success path) — leave the "Restarting…" view in place.
+    // (the expected success path) — leave the reconnect watch running.
   }
 }
 

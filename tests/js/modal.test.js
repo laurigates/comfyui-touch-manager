@@ -5,9 +5,10 @@
 // suite can coexist with an empty or unwired modal. This mounts the real
 // openManager() against a jsdom document and asserts the shell renders all
 // four tabs, calls the backend, and paints loaded data into the body.
-import { beforeEach, describe, expect, it } from "vitest";
-import { openManager } from "../../src/touch-manager-ui.ts";
-import { __fetchCalls, __reset, __responses } from "./__mocks__/app.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RECONNECT_POLL } from "../../src/manager-core.ts";
+import { openManager, reloadController } from "../../src/touch-manager-ui.ts";
+import { __fetchCalls, __fetchControl, __reset, __responses } from "./__mocks__/app.js";
 
 // Let queued microtasks + the deferred initial load settle.
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -462,5 +463,77 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(checksAfter).toBe(checksBefore);
     // The restart notice surfaces without leaving the list.
     expect(document.body.textContent).toContain("Restart ComfyUI to apply");
+  });
+
+  // ----- reconnect-and-reload after a restart -----
+
+  const coreResponse = () => ({
+    ok: true,
+    is_git: true,
+    ref: { type: "branch", name: "master", sha: "abc1234" },
+    behind: { origin: 0, upstream: 0 },
+    dirty: false,
+    remotes: { origin: null, upstream: null },
+  });
+
+  // Drive the modal to the Core tab and confirm a restart. Callers choose the
+  // timer/advance helper via `settle` so both real- and fake-timer tests reuse
+  // this. Returns after the reboot POST has fired and the watch is armed.
+  const restartFromCore = async (settle) => {
+    openManager();
+    await settle();
+    await settle();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Core")?.click();
+    await settle();
+    await settle();
+    [...document.querySelectorAll("button")]
+      .find((b) => b.textContent === "Restart ComfyUI")
+      ?.click();
+    await settle();
+    // The restart confirm is danger-styled, drawn via the kit's confirmInShell.
+    document.querySelector(".cmp-ov-backdrop .cmp-ov-danger")?.click();
+    await settle();
+  };
+
+  it("shows a Restarting view with a Reload now fallback after a restart", async () => {
+    __responses["/touch_manager/core"] = coreResponse();
+    const flushT = () => new Promise((r) => setTimeout(r, 0));
+    await restartFromCore(flushT);
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
+    expect(document.body.textContent).toContain("Restarting ComfyUI…");
+    expect(document.body.textContent).toContain("Waiting for ComfyUI to come back");
+    // A manual reload fallback is available immediately, before any auto-reload.
+    expect(
+      [...document.querySelectorAll("button")].some((b) => b.textContent === "Reload now"),
+    ).toBe(true);
+  });
+
+  it("polls after a restart and auto-reloads once the server answers again", async () => {
+    vi.useFakeTimers();
+    const reload = vi.spyOn(reloadController, "reload").mockImplementation(() => {});
+    try {
+      __responses["/touch_manager/core"] = coreResponse();
+      const tick = () => vi.advanceTimersByTimeAsync(1);
+      await restartFromCore(tick);
+
+      expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
+      expect(reload).not.toHaveBeenCalled();
+
+      // The next probe (the first, after the grace delay) sees the server down…
+      __fetchControl.failNext = 1;
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL.graceMs + 10);
+      expect(reload).not.toHaveBeenCalled();
+
+      // …the following probe finds it back, which starts the reload countdown…
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL.intervalMs + 10);
+      // …and the countdown elapses to an automatic reload.
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL.countdownSeconds * 1000 + 100);
+
+      expect(reload).toHaveBeenCalled();
+    } finally {
+      reload.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

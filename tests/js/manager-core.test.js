@@ -8,6 +8,7 @@ import {
   formatDepsResult,
   formatDownloads,
   formatProgress,
+  formatReconnectStatus,
   formatRef,
   formatRegistryMeta,
   formatUpdateStatus,
@@ -17,7 +18,9 @@ import {
   mergeVersionEntries,
   normalizeRegistryNode,
   partitionUpdateResults,
+  RECONNECT_POLL,
   rebootPermitted,
+  reconnectExpired,
   sanitizePackName,
   sortBranches,
   sortTags,
@@ -481,5 +484,30 @@ describe("filterPacks — fuzzy ranking over [name, remote_url, author]", () => 
 
   it("returns nothing when no field matches", () => {
     expect(filterPacks("zzzznomatch", packs)).toEqual([]);
+  });
+});
+
+describe("reconnect-after-restart poll helpers", () => {
+  it("exposes a sane poll config (grace < timeout, positive interval)", () => {
+    expect(RECONNECT_POLL.graceMs).toBeGreaterThan(0);
+    expect(RECONNECT_POLL.intervalMs).toBeGreaterThan(0);
+    expect(RECONNECT_POLL.timeoutMs).toBeGreaterThan(RECONNECT_POLL.graceMs);
+    expect(RECONNECT_POLL.countdownSeconds).toBeGreaterThan(0);
+  });
+
+  it("reconnectExpired is false until the timeout budget is reached", () => {
+    expect(reconnectExpired(0, 10000)).toBe(false);
+    expect(reconnectExpired(9999, 10000)).toBe(false);
+    expect(reconnectExpired(10000, 10000)).toBe(true);
+    expect(reconnectExpired(20000, 10000)).toBe(true);
+  });
+
+  it("formatReconnectStatus counts up in seconds while waiting", () => {
+    expect(formatReconnectStatus(0, 10000)).toMatch(/Waiting for ComfyUI.*\(0s\)/);
+    expect(formatReconnectStatus(4200, 10000)).toContain("(4s)");
+  });
+
+  it("formatReconnectStatus switches to a took-longer message past the timeout", () => {
+    expect(formatReconnectStatus(10000, 10000)).toMatch(/longer than expected/);
   });
 });

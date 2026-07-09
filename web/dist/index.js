@@ -885,6 +885,22 @@ function installPermitted(config) {
 function rebootPermitted(config) {
   return config ? config.reboot_allowed : false;
 }
+var RECONNECT_POLL = {
+  graceMs: 1500,
+  intervalMs: 2000,
+  timeoutMs: 120000,
+  countdownSeconds: 3
+};
+function reconnectExpired(elapsedMs, timeoutMs = RECONNECT_POLL.timeoutMs) {
+  return elapsedMs >= timeoutMs;
+}
+function formatReconnectStatus(elapsedMs, timeoutMs = RECONNECT_POLL.timeoutMs) {
+  if (reconnectExpired(elapsedMs, timeoutMs)) {
+    return "ComfyUI is taking longer than expected to come back — reload when it is ready.";
+  }
+  const secs = Math.max(0, Math.floor(elapsedMs / 1000));
+  return `Waiting for ComfyUI to come back… (${secs}s)`;
+}
 var ALLOWED_INSTALL_HOSTS = new Set(["github.com", "gitlab.com"]);
 function sanitizePackName(raw) {
   if (raw.includes("/") || raw.includes("\\"))
@@ -1910,24 +1926,91 @@ async function renderCoreTab(state) {
   section.appendChild(actions);
   section.appendChild(el("div", "tm-note tm-note-info", "Runs git pull on the core repo and installs any changed Python dependencies. Restart ComfyUI yourself afterwards."));
 }
+var reloadController = {
+  reload() {
+    window.location.reload();
+  }
+};
+var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function probeServer() {
+  try {
+    const res = await app.api.fetchApi(app.api.apiURL("/touch_manager/config"), {
+      cache: "no-store"
+    });
+    return res.ok === true;
+  } catch {
+    return false;
+  }
+}
+function startReloadCountdown(status, actions) {
+  let remaining = RECONNECT_POLL.countdownSeconds;
+  let cancelled = false;
+  const tick = () => {
+    if (cancelled)
+      return;
+    if (remaining <= 0) {
+      reloadController.reload();
+      return;
+    }
+    status.textContent = `ComfyUI is back — reloading in ${remaining}…`;
+    remaining -= 1;
+    setTimeout(tick, 1000);
+  };
+  actions.replaceChildren();
+  actions.appendChild(button("Reload now", "tm-btn-primary", () => {
+    cancelled = true;
+    reloadController.reload();
+  }));
+  actions.appendChild(button("Cancel", "", () => {
+    cancelled = true;
+    status.textContent = "ComfyUI is back. Reload when you're ready.";
+  }));
+  tick();
+}
+async function watchForReconnect(state, watch) {
+  const section = resetBody(state);
+  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
+  const status = el("div", "tm-note tm-note-info", formatReconnectStatus(0));
+  section.appendChild(status);
+  const actions = el("div", "tm-row-actions");
+  actions.appendChild(button("Reload now", "tm-btn-primary", () => reloadController.reload()));
+  section.appendChild(actions);
+  const start = Date.now();
+  await sleep(RECONNECT_POLL.graceMs);
+  while (!watch.cancelled && !reconnectExpired(Date.now() - start)) {
+    if (await probeServer()) {
+      if (watch.cancelled)
+        return;
+      startReloadCountdown(status, actions);
+      return;
+    }
+    if (watch.cancelled)
+      return;
+    status.textContent = formatReconnectStatus(Date.now() - start);
+    await sleep(RECONNECT_POLL.intervalMs);
+  }
+  if (!watch.cancelled) {
+    status.textContent = formatReconnectStatus(RECONNECT_POLL.timeoutMs);
+  }
+}
 async function doReboot(state) {
   const ok = await confirmInShell(state.shell, {
     title: "Restart ComfyUI?",
-    message: "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable while it comes back up.",
+    message: "Restart the ComfyUI server now to apply changes? The server will be briefly unavailable, then this page reloads automatically once it is back.",
     confirmLabel: "Restart now",
     danger: true,
     enterConfirms: true
   });
   if (!ok)
     return;
-  toast("info", "Restarting ComfyUI…", "The server will be briefly unavailable.", 8000);
-  const section = resetBody(state);
-  section.appendChild(el("div", "tm-row-title", "Restarting ComfyUI…"));
-  section.appendChild(el("div", "tm-note tm-note-info", "The server is restarting. This page will reconnect once it is back; reload if it does not."));
+  toast("info", "Restarting ComfyUI…", "The page will reload automatically once it is back.", 8000);
+  const watch = { cancelled: false };
+  watchForReconnect(state, watch);
   try {
     await apiPost("reboot", {});
   } catch (e) {
     if (e instanceof ManagerError) {
+      watch.cancelled = true;
       toast("error", "Restart failed", `${e.message}${e.code ? ` (${e.code})` : ""}`);
       await renderCoreTab(state);
     }

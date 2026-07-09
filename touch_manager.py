@@ -412,6 +412,49 @@ def _core_dir() -> str:
     return os.path.dirname(folder_paths.__file__)
 
 
+_REMOTE_OWNER_RE = re.compile(
+    r"^(?:https://(?:github|gitlab)\.com/|git@(?:github|gitlab)\.com:)([^/]+)/"
+)
+
+
+def _owner_from_remote(remote: str | None) -> str | None:
+    """Best-effort owner/org parsed from a github.com or gitlab.com remote URL."""
+    if not remote:
+        return None
+    m = _REMOTE_OWNER_RE.match(remote)
+    return m.group(1) if m else None
+
+
+def _pyproject_publisher(path: str) -> str | None:
+    """Return ``[tool.comfy].PublisherId`` from a pyproject.toml, or None."""
+    if tomllib is None:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    tool = data.get("tool")
+    comfy = tool.get("comfy") if isinstance(tool, dict) else None
+    publisher = comfy.get("PublisherId") if isinstance(comfy, dict) else None
+    return publisher if isinstance(publisher, str) and publisher.strip() else None
+
+
+def _pack_author(full: str, remote_url: str | None) -> str:
+    """The pack's author for display/filtering.
+
+    A git remote's owner (github.com/gitlab.com) wins when present; otherwise
+    fall back to the registry PublisherId in pyproject.toml (set for packs
+    installed from the Comfy Registry, which are not git checkouts). "" when
+    neither source resolves.
+    """
+    owner = _owner_from_remote(remote_url)
+    if owner:
+        return owner
+    publisher = _pyproject_publisher(os.path.join(full, "pyproject.toml"))
+    return publisher or ""
+
+
 def _find_pack(name: str, *, include_disabled: bool = False) -> str | None:
     """Locate a pack dir by sanitised ``name`` across all custom_nodes roots."""
     safe = _sanitize_name(name)
@@ -683,6 +726,49 @@ def _pyproject_deps(path: str) -> list[str]:
     return [d for d in deps if isinstance(d, str) and d.strip()]
 
 
+def _pyproject_project_meta(path: str) -> dict[str, str | None]:
+    """Return ``{"name", "version"}`` from a pyproject.toml's ``[project]`` table.
+
+    Both None when tomllib is unavailable (Python < 3.11), the file is
+    unparsable, or the fields are absent/blank.
+    """
+    empty: dict[str, str | None] = {"name": None, "version": None}
+    if tomllib is None:
+        return empty
+    try:
+        with open(path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return empty
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return empty
+    name = project.get("name")
+    version = project.get("version")
+    return {
+        "name": name if isinstance(name, str) and name.strip() else None,
+        "version": version if isinstance(version, str) and version.strip() else None,
+    }
+
+
+def _registry_source_meta(full: str) -> dict[str, str] | None:
+    """Registry ``{id, version}`` for a non-git pack with a Comfy Registry pyproject.
+
+    ``id`` is the package's ``[project.name]`` — the slug the registry
+    publishes under — and ``version`` its ``[project.version]``. None when
+    either is missing/unparsable, meaning the pack is a plain, unmanaged
+    directory this manager cannot check for registry updates.
+    """
+    pyproject = os.path.join(full, "pyproject.toml")
+    if not os.path.isfile(pyproject):
+        return None
+    meta = _pyproject_project_meta(pyproject)
+    name, version = meta["name"], meta["version"]
+    if not name or not version:
+        return None
+    return {"id": name, "version": version}
+
+
 def _install_deps(pack_dir: str, timeout: int = 300) -> dict[str, Any]:
     """Install a pack's Python dependencies from requirements.txt / pyproject.toml.
 
@@ -746,6 +832,7 @@ def _describe_pack(root: str, entry: str) -> dict[str, Any]:
         ref = {"type": "detached", "name": None, "sha": None}
         remote_url = None
         dirty = False
+    registry = None if is_git else _registry_source_meta(full)
     return {
         "name": name,
         "path": full,
@@ -755,6 +842,10 @@ def _describe_pack(root: str, entry: str) -> dict[str, Any]:
         "remote_url": remote_url,
         "dirty": dirty,
         "enabled": enabled,
+        "author": _pack_author(full, remote_url),
+        "source": "git" if is_git else ("registry" if registry else "unknown"),
+        "registry_id": registry["id"] if registry else None,
+        "installed_version": registry["version"] if registry else None,
     }
 
 
@@ -785,11 +876,14 @@ def _collect_installed() -> list[dict[str, Any]]:
     return packs
 
 
-def _list_git_packs() -> list[dict[str, Any]]:
-    """Names of every git pack across roots (no fetch — for fast listing).
+def _list_updatable_packs() -> list[dict[str, Any]]:
+    """Names of every pack across roots this manager can check for updates.
 
-    Lets the frontend paint the update-check skeleton instantly and then check
-    each pack one at a time, streaming results in.
+    Two kinds: git packs (fetch-based check) and registry-installed packs with
+    a resolvable ``[project]`` name/version in pyproject.toml
+    (registry-version-based check). No fetch here — for fast listing. Lets the
+    frontend paint the update-check skeleton instantly and then check each
+    pack one at a time, streaming results in.
     """
     out: list[dict[str, Any]] = []
     for root in _custom_nodes_roots():
@@ -800,14 +894,13 @@ def _list_git_packs() -> list[dict[str, Any]]:
             if entry.endswith(_DISABLED_SUFFIX):
                 continue
             full = os.path.join(root, entry)
-            if not _is_git(full):
-                continue
-            out.append({"name": entry})
+            if _is_git(full) or _registry_source_meta(full):
+                out.append({"name": entry})
     return out
 
 
 def _check_one_update(full: str, name: str) -> dict[str, Any]:
-    """Fetch ONE pack and report behind/ahead plus a short incoming commit log.
+    """Fetch ONE git pack and report behind/ahead plus a short incoming commit log.
 
     Same per-pack shape as _collect_updates, with an extra ``incoming`` preview
     so the UI can show what an update would bring. Degrades per-pack: a fetch
@@ -817,11 +910,13 @@ def _check_one_update(full: str, name: str) -> dict[str, Any]:
     if rc != 0:
         return {
             "name": name,
+            "source": "git",
             "update_available": False,
             "behind": 0,
             "ahead": 0,
             "error": err.strip() or "fetch failed",
             "incoming": [],
+            "latest_version": None,
         }
     ahead, behind, err2 = _ahead_behind(full)
     incoming: list[dict[str, str]] = []
@@ -834,11 +929,60 @@ def _check_one_update(full: str, name: str) -> dict[str, Any]:
                     incoming.append({"sha": sha, "subject": subject})
     return {
         "name": name,
+        "source": "git",
         "update_available": behind > 0,
         "behind": behind,
         "ahead": ahead,
         "error": err2,
         "incoming": incoming,
+        "latest_version": None,
+    }
+
+
+def _check_one_registry_update(node_id: str, current_version: str, name: str) -> dict[str, Any]:
+    """Compare an installed registry pack's version against the registry's latest.
+
+    Same per-pack shape as _check_one_update so the frontend sweep can treat
+    both kinds uniformly. Degrades to an ``error`` entry on any registry
+    failure rather than raising.
+    """
+    node = _registry_get(f"/nodes/{node_id}")
+    if not isinstance(node, dict):
+        return {
+            "name": name,
+            "source": "registry",
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "error": "registry unavailable",
+            "incoming": [],
+            "latest_version": None,
+        }
+    latest = node.get("latest_version")
+    latest_version = latest.get("version") if isinstance(latest, dict) else None
+    if not latest_version:
+        return {
+            "name": name,
+            "source": "registry",
+            "update_available": False,
+            "behind": 0,
+            "ahead": 0,
+            "error": "no published version",
+            "incoming": [],
+            "latest_version": None,
+        }
+    update_available = latest_version != current_version
+    return {
+        "name": name,
+        "source": "registry",
+        "update_available": update_available,
+        "behind": 1 if update_available else 0,
+        "ahead": 0,
+        "error": None,
+        "incoming": [{"sha": "", "subject": f"v{latest_version} available"}]
+        if update_available
+        else [],
+        "latest_version": latest_version,
     }
 
 
@@ -925,10 +1069,13 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
     after = after_out.strip() if rc == 0 else ""
 
     result: dict[str, Any] = {
+        "source": "git",
         "before": before or None,
         "after": after or None,
         "before_short": before[:7] or None,
         "after_short": after[:7] or None,
+        "before_version": None,
+        "after_version": None,
         "commits_applied": 0,
         "commit_log": [],
         "changed_files": 0,
@@ -956,6 +1103,108 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
             result["changed_files"] = len(files)
             result["deps_changed"] = any(os.path.basename(f) in _DEPS_FILES for f in files)
     return result, "", ""
+
+
+def _do_registry_update(
+    node_id: str, version: str | None, target: str
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Re-download a registry pack's archive into an existing ``target`` dir.
+
+    Mirrors ``_do_registry_install`` but REPLACES an existing pack instead of
+    refusing when it already exists. The new archive is downloaded and staged
+    BEFORE anything on disk changes; only once it is verified valid does the
+    old dir get renamed aside and the staged one swapped in — a failure at any
+    point before the swap leaves the original pack completely untouched, and a
+    failure during the swap itself restores it. ``version`` None targets the
+    registry's latest published version; when that already matches the pack's
+    current version, nothing is downloaded.
+    """
+    root = os.path.dirname(target)
+    before_version = _pyproject_project_meta(os.path.join(target, "pyproject.toml"))["version"]
+
+    info = _registry_get(f"/nodes/{node_id}/install", {"version": version} if version else None)
+    if not isinstance(info, dict):
+        return None, "registry unavailable", "registry_unavailable"
+    resolved_version = info.get("version") or version or before_version
+
+    no_op_result: dict[str, Any] = {
+        "source": "registry",
+        "before_short": None,
+        "after_short": None,
+        "before_version": before_version,
+        "after_version": before_version,
+        "commits_applied": 0,
+        "commit_log": [],
+        "changed_files": 0,
+        "deps_changed": False,
+        "truncated": False,
+    }
+    if not version and resolved_version == before_version:
+        return no_op_result, "", ""
+
+    download_url = info.get("downloadUrl")
+    if not _validate_archive_url(download_url):
+        return None, "registry returned an unsupported download url", "invalid_archive_url"
+
+    try:
+        data = _fetch_bytes(download_url, MAX_ARCHIVE_BYTES)
+    except Exception as exc:
+        return None, str(exc) or "download failed", "download_failed"
+
+    stage: str | None = tempfile.mkdtemp(prefix=".tm-reg-", dir=root)
+    backup: str | None = None
+    try:
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                if not _zip_members_safe(zf):
+                    return None, "unsafe archive member", "extract_failed"
+                zf.extractall(stage)
+        except zipfile.BadZipFile:
+            return None, "bad zip archive", "extract_failed"
+
+        entries = os.listdir(stage)
+        if len(entries) == 1 and os.path.isdir(os.path.join(stage, entries[0])):
+            pack_root = os.path.join(stage, entries[0])  # unwrap single dir
+        else:
+            pack_root = stage
+        deps_changed = any(os.path.isfile(os.path.join(pack_root, f)) for f in _DEPS_FILES)
+
+        # Dot-prefixed so a backup left behind by a crash mid-swap is skipped
+        # by the installed listing (_iter_pack_dirs), same as the stage dir.
+        backup = os.path.join(root, f".tm-reg-backup-{os.path.basename(target)}")
+        if os.path.exists(backup):
+            shutil.rmtree(backup, ignore_errors=True)
+        os.rename(target, backup)
+        try:
+            os.rename(pack_root, target)
+        except OSError as exc:
+            os.rename(backup, target)  # restore the original pack
+            backup = None
+            return None, str(exc) or "swap failed", "install_failed"
+        if pack_root == stage:
+            stage = None  # the stage dir itself became the target
+
+        return (
+            {
+                "source": "registry",
+                "before_short": None,
+                "after_short": None,
+                "before_version": before_version,
+                "after_version": resolved_version,
+                "commits_applied": 1,
+                "commit_log": [],
+                "changed_files": 0,
+                "deps_changed": deps_changed,
+                "truncated": False,
+            },
+            "",
+            "",
+        )
+    finally:
+        if stage and os.path.isdir(stage):
+            shutil.rmtree(stage, ignore_errors=True)
+        if backup and os.path.isdir(backup):
+            shutil.rmtree(backup, ignore_errors=True)  # old version — discard once swapped in
 
 
 # ---------------------------------------------------------------------------
@@ -1006,23 +1255,29 @@ async def installed(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.get("/touch_manager/updates/list")
 async def updates_list(request: web.Request) -> web.Response:
-    """Fast list of git-pack names (no fetch) so the UI can stream checks."""
-    packs = await _run(_list_git_packs)
+    """Fast list of updatable pack names (no fetch) so the UI can stream checks."""
+    packs = await _run(_list_updatable_packs)
     return web.json_response({"ok": True, "packs": packs})
 
 
 @PromptServer.instance.routes.get("/touch_manager/updates/check")
 async def updates_check(request: web.Request) -> web.Response:
-    """Check ONE pack for updates (git fetch + ahead/behind + incoming log)."""
+    """Check ONE pack for updates: git fetch + ahead/behind, or a registry
+    version comparison for a non-git pack installed from the Comfy Registry.
+    """
     name = _sanitize_name(request.rel_url.query.get("name", ""))
     if not name:
         return _err("missing or invalid name", "not_found", 400)
     full = _find_pack(name)
     if not full:
         return _err("not found", "not_found", 404)
-    if not await _run(_is_git, full):
+    if await _run(_is_git, full):
+        result = await _run(_check_one_update, full, name)
+        return web.json_response({"ok": True, **result})
+    meta = await _run(_registry_source_meta, full)
+    if not meta:
         return _err("not a git repository", "not_git", 400)
-    result = await _run(_check_one_update, full, name)
+    result = await _run(_check_one_registry_update, meta["id"], meta["version"], name)
     return web.json_response({"ok": True, **result})
 
 
@@ -1198,7 +1453,10 @@ async def install(request: web.Request) -> web.Response:
 
 @PromptServer.instance.routes.post("/touch_manager/update")
 async def update(request: web.Request) -> web.Response:
-    """Fetch then checkout/fast-forward one pack to ``ref`` (or its upstream)."""
+    """Update one pack: git fetch+checkout for a git pack, or a fresh archive
+    download for a pack installed from the Comfy Registry (which is not a git
+    checkout — there is nothing to fetch/checkout).
+    """
     body = await _body(request)
     name = _sanitize_name(str(body.get("name", "")))
     if not name:
@@ -1206,24 +1464,36 @@ async def update(request: web.Request) -> web.Response:
     full = _find_pack(name)
     if not full:
         return _err("not found", "not_found", 404)
-    if not _is_git(full):
+
+    if await _run(_is_git, full):
+        # Validate any explicit ref BEFORE fetching so a malicious ref never
+        # reaches git (argument-injection guard — see _safe_ref).
+        ref = body.get("ref")
+        safe_ref = _safe_ref(ref) if ref else None
+        if ref and safe_ref is None:
+            return _err("invalid ref", "checkout_failed", 400)
+
+        result, err, code = await _run(_do_pack_update, full, safe_ref)
+        if result is None:
+            return _err(err, code, 500)
+        # Only reinstall when the update actually touched a dependency file — an
+        # unrelated update should not pay for a full pip resolve.
+        result["deps"] = await _run(_install_deps, full) if result["deps_changed"] else _no_deps()
+        return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
+
+    meta = await _run(_registry_source_meta, full)
+    if not meta:
         return _err("not a git repository", "not_git", 400)
 
-    # Validate any explicit ref BEFORE fetching so a malicious ref never reaches
-    # git (argument-injection guard — see _safe_ref).
-    ref = body.get("ref")
-    safe_ref = _safe_ref(ref) if ref else None
-    if ref and safe_ref is None:
-        return _err("invalid ref", "checkout_failed", 400)
+    raw_version = body.get("version")
+    version = _safe_version(raw_version) if raw_version else None
+    if raw_version and version is None:
+        return _err("invalid version", "invalid_version", 400)
 
-    result, err, code = await _run(_do_pack_update, full, safe_ref)
+    result, err, code = await _run(_do_registry_update, meta["id"], version, full)
     if result is None:
         return _err(err, code, 500)
-
-    # Only reinstall when the update actually touched a dependency file — an
-    # unrelated update should not pay for a full pip resolve.
     result["deps"] = await _run(_install_deps, full) if result["deps_changed"] else _no_deps()
-
     return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
 
 

@@ -957,6 +957,9 @@ function formatUpdateStatus(info) {
   if (info.error)
     return `error: ${info.error}`;
   if (info.update_available) {
+    if (info.source === "registry") {
+      return info.latest_version ? `update available — v${info.latest_version}` : "update available";
+    }
     const parts = [];
     if (info.behind > 0)
       parts.push(`${info.behind} behind`);
@@ -971,6 +974,9 @@ function formatUpdateStatus(info) {
 function formatUpdateSummary(r) {
   if (r.commits_applied === 0)
     return "Already up to date — nothing to apply.";
+  if (r.source === "registry") {
+    return r.before_version && r.after_version ? `${r.before_version} → ${r.after_version}` : "Updated.";
+  }
   const parts = [];
   if (r.before_short && r.after_short)
     parts.push(`${r.before_short} → ${r.after_short}`);
@@ -1060,7 +1066,7 @@ function filterPacks(query, packs) {
   }
   const scored = [];
   for (const pack of packs) {
-    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null]);
+    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null, pack.author || null]);
     if (r)
       scored.push({ pack, score: r.score, primaryMatches: r.primaryMatches });
   }
@@ -1355,25 +1361,29 @@ function installedRow(state, pack, matches) {
   const metaBits = [];
   if (pack.is_git)
     metaBits.push(formatRef(pack.ref));
-  else
+  else if (pack.source === "registry") {
+    metaBits.push(`registry pack${pack.installed_version ? ` v${pack.installed_version}` : ""}`);
+  } else
     metaBits.push("not a git repo");
   if (pack.dirty)
     metaBits.push("local changes");
+  if (pack.author)
+    metaBits.push(`by ${pack.author}`);
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
   if (pack.remote_url)
     row.appendChild(el("div", "tm-row-meta", pack.remote_url));
   row.appendChild(el("div", "tm-update-status"));
   const actions = el("div", "tm-row-actions");
-  const gitDisabledReason = pack.is_git ? "" : "not a git repo";
+  const updatable = pack.is_git || pack.source === "registry";
   const updateBtn = button("Update", "tm-update-btn", () => void doUpdate(state, pack.name, { origin: "installed" }));
-  updateBtn.disabled = !pack.is_git;
-  if (gitDisabledReason)
-    updateBtn.title = gitDisabledReason;
+  updateBtn.disabled = !updatable;
+  if (!updatable)
+    updateBtn.title = "not a git repo or registry-installed pack";
   actions.appendChild(updateBtn);
   const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
   versionsBtn.disabled = !pack.is_git;
-  if (gitDisabledReason)
-    versionsBtn.title = gitDisabledReason;
+  if (!pack.is_git)
+    versionsBtn.title = "not a git repo";
   actions.appendChild(versionsBtn);
   if (pack.enabled) {
     actions.appendChild(button("Uninstall", "tm-btn-danger", () => void doUninstall(state, pack.name)));
@@ -1390,7 +1400,7 @@ function applyUpdateStatus(state, row, pack) {
   status.replaceChildren();
   row.classList.remove("tm-has-update");
   updateBtn?.classList.remove("tm-btn-primary");
-  if (!pack.is_git)
+  if (!pack.is_git && pack.source !== "registry")
     return;
   const info = state.sweep?.results.get(pack.name);
   if (!info) {
@@ -1594,11 +1604,13 @@ async function startUpdateSweep(state) {
       } catch (e) {
         info = {
           name,
+          source: "unknown",
           update_available: false,
           behind: 0,
           ahead: 0,
           error: e.message,
-          incoming: []
+          incoming: [],
+          latest_version: null
         };
       }
       if (state.sweep !== sweep)

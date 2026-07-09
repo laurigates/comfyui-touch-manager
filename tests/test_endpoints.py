@@ -775,6 +775,294 @@ def test_update_rejects_option_injection_ref_before_fetch(monkeypatch, tmp_path)
 
 
 # ===========================================================================
+# Author + registry-source metadata (feeds /installed and the update flow)
+# ===========================================================================
+
+
+def _write_pyproject(path, *, name=None, version=None, publisher=None):
+    lines = ["[project]"]
+    if name is not None:
+        lines.append(f'name = "{name}"')
+    if version is not None:
+        lines.append(f'version = "{version}"')
+    if publisher is not None:
+        lines.append("")
+        lines.append("[tool.comfy]")
+        lines.append(f'PublisherId = "{publisher}"')
+    (path / "pyproject.toml").write_text("\n".join(lines) + "\n")
+
+
+def test_owner_from_remote_parses_https_and_ssh():
+    assert pack._owner_from_remote("https://github.com/owner/repo") == "owner"
+    assert pack._owner_from_remote("https://github.com/owner/repo.git") == "owner"
+    assert pack._owner_from_remote("https://gitlab.com/group/proj") == "group"
+    assert pack._owner_from_remote("git@github.com:owner/repo.git") == "owner"
+    assert pack._owner_from_remote("https://evil.example.com/owner/repo") is None
+    assert pack._owner_from_remote(None) is None
+
+
+def test_pyproject_publisher_reads_tool_comfy(tmp_path):
+    _write_pyproject(tmp_path, name="foo", version="1.0.0", publisher="laurigates")
+    assert pack._pyproject_publisher(str(tmp_path / "pyproject.toml")) == "laurigates"
+    assert pack._pyproject_publisher(str(tmp_path / "missing.toml")) is None
+
+
+def test_pack_author_prefers_remote_owner_over_publisher(tmp_path):
+    _write_pyproject(tmp_path, name="foo", version="1.0.0", publisher="publisherid")
+    assert pack._pack_author(str(tmp_path), "https://github.com/owner/repo") == "owner"
+    assert pack._pack_author(str(tmp_path), None) == "publisherid"
+    assert pack._pack_author(str(tmp_path), "https://evil.example.com/x/y") == "publisherid"
+
+
+def test_pack_author_empty_when_nothing_resolves(tmp_path):
+    assert pack._pack_author(str(tmp_path), None) == ""
+
+
+def test_pyproject_project_meta_parses_name_and_version(tmp_path):
+    _write_pyproject(tmp_path, name="comfyui-foo", version="1.2.0")
+    meta = pack._pyproject_project_meta(str(tmp_path / "pyproject.toml"))
+    assert meta == {"name": "comfyui-foo", "version": "1.2.0"}
+
+
+def test_pyproject_project_meta_missing_file_is_empty(tmp_path):
+    assert pack._pyproject_project_meta(str(tmp_path / "nope.toml")) == {
+        "name": None,
+        "version": None,
+    }
+
+
+def test_registry_source_meta_requires_name_and_version(tmp_path):
+    pack_dir = tmp_path / "pack"
+    pack_dir.mkdir()
+    assert pack._registry_source_meta(str(pack_dir)) is None  # no pyproject.toml
+
+    _write_pyproject(pack_dir, name="comfyui-foo")  # no version
+    assert pack._registry_source_meta(str(pack_dir)) is None
+
+    _write_pyproject(pack_dir, name="comfyui-foo", version="1.0.0")
+    assert pack._registry_source_meta(str(pack_dir)) == {"id": "comfyui-foo", "version": "1.0.0"}
+
+
+# ===========================================================================
+# GET /touch_manager/installed — author/source/registry metadata per pack
+# ===========================================================================
+
+
+def test_installed_reports_author_and_source_for_git_pack(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _set_roots(root)
+
+    packs = {p["name"]: p for p in _get(pack.installed).json_body["packs"]}
+    p = packs["pack"]
+    assert p["source"] == "git"
+    assert p["registry_id"] is None
+    assert p["installed_version"] is None
+    # The local-path "origin" doesn't match github/gitlab, so no owner resolves.
+    assert p["author"] == ""
+
+
+def test_installed_reports_registry_source_for_non_git_pack(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    pack_dir = root / "regpack"
+    pack_dir.mkdir()
+    _write_pyproject(pack_dir, name="regpack", version="2.0.0", publisher="someauthor")
+    _set_roots(root)
+
+    packs = {p["name"]: p for p in _get(pack.installed).json_body["packs"]}
+    p = packs["regpack"]
+    assert p["is_git"] is False
+    assert p["source"] == "registry"
+    assert p["registry_id"] == "regpack"
+    assert p["installed_version"] == "2.0.0"
+    assert p["author"] == "someauthor"
+
+
+def test_installed_reports_unknown_source_for_plain_dir(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "plain").mkdir()
+    _set_roots(root)
+
+    p = _get(pack.installed).json_body["packs"][0]
+    assert p["source"] == "unknown"
+    assert p["registry_id"] is None
+    assert p["author"] == ""
+
+
+# ===========================================================================
+# updates/list + updates/check + update — registry-installed (non-git) packs
+# ===========================================================================
+
+
+def test_updates_list_includes_registry_packs(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "gitpack")
+    (root / "plain").mkdir()  # no pyproject — still excluded
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version="1.0.0")
+    _set_roots(root)
+
+    names = {p["name"] for p in _get(pack.updates_list).json_body["packs"]}
+    assert names == {"gitpack", "regpack"}
+
+
+def test_updates_check_registry_update_available(monkeypatch, tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version="1.0.0")
+    _set_roots(root)
+
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {"latest_version": {"version": "1.2.0"}},
+    )
+    body = _get(pack.updates_check, name="regpack").json_body
+    assert body["ok"] is True
+    assert body["source"] == "registry"
+    assert body["update_available"] is True
+    assert body["latest_version"] == "1.2.0"
+
+
+def test_updates_check_registry_up_to_date(monkeypatch, tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version="1.2.0")
+    _set_roots(root)
+
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {"latest_version": {"version": "1.2.0"}},
+    )
+    body = _get(pack.updates_check, name="regpack").json_body
+    assert body["update_available"] is False
+
+
+def test_updates_check_registry_unavailable_degrades(monkeypatch, tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version="1.0.0")
+    _set_roots(root)
+
+    monkeypatch.setattr(pack, "_registry_get", lambda path, params=None: None)
+    body = _get(pack.updates_check, name="regpack").json_body
+    assert body["ok"] is True
+    assert body["update_available"] is False
+    assert body["error"] == "registry unavailable"
+
+
+def _registry_update_setup(monkeypatch, tmp_path, *, current_version, archive, resolved_version):
+    root = tmp_path / "cn"
+    root.mkdir()
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version=current_version)
+    _set_roots(root)
+    monkeypatch.setattr(
+        pack,
+        "_registry_get",
+        lambda path, params=None: {
+            "downloadUrl": "https://storage.googleapis.com/b/x.zip",
+            "version": resolved_version,
+        },
+    )
+    monkeypatch.setattr(pack, "_fetch_bytes", lambda url, cap: archive)
+    return root, reg
+
+
+def test_update_registry_pack_downloads_and_swaps(monkeypatch, tmp_path):
+    archive = _zip_bytes({"pyproject.toml": '[project]\nname = "regpack"\nversion = "1.2.0"\n'})
+    root, reg = _registry_update_setup(
+        monkeypatch, tmp_path, current_version="1.0.0", archive=archive, resolved_version="1.2.0"
+    )
+    body = _post(pack.update, name="regpack").json_body
+    assert body["ok"] is True
+    assert body["source"] == "registry"
+    assert body["before_version"] == "1.0.0"
+    assert body["after_version"] == "1.2.0"
+    assert body["commits_applied"] == 1
+    assert body["restart_required"] is True
+    installed_meta = pack._pyproject_project_meta(str(reg / "pyproject.toml"))
+    assert installed_meta["version"] == "1.2.0"
+    # No leftover staging/backup dirs.
+    assert [p.name for p in root.iterdir()] == ["regpack"]
+
+
+def test_update_registry_pack_no_op_when_already_latest(monkeypatch, tmp_path):
+    _registry_update_setup(
+        monkeypatch, tmp_path, current_version="1.2.0", archive=b"", resolved_version="1.2.0"
+    )
+
+    def boom(url, cap):  # a no-op update must never download
+        raise AssertionError("should not fetch when already at the latest version")
+
+    monkeypatch.setattr(pack, "_fetch_bytes", boom)
+    body = _post(pack.update, name="regpack").json_body
+    assert body["ok"] is True
+    assert body["commits_applied"] == 0
+    assert body["before_version"] == body["after_version"] == "1.2.0"
+
+
+def test_update_registry_pack_download_failure_preserves_original(monkeypatch, tmp_path):
+    root, reg = _registry_update_setup(
+        monkeypatch, tmp_path, current_version="1.0.0", archive=b"", resolved_version="1.2.0"
+    )
+
+    def boom(url, cap):
+        raise ValueError("archive exceeds size cap")
+
+    monkeypatch.setattr(pack, "_fetch_bytes", boom)
+    resp = _post(pack.update, name="regpack")
+    assert resp.status == 500
+    assert resp.json_body["code"] == "download_failed"
+    # The original pack is untouched.
+    assert pack._pyproject_project_meta(str(reg / "pyproject.toml"))["version"] == "1.0.0"
+    assert [p.name for p in root.iterdir()] == ["regpack"]
+
+
+def test_update_registry_pack_explicit_version(monkeypatch, tmp_path):
+    archive = _zip_bytes({"pyproject.toml": '[project]\nname = "regpack"\nversion = "0.9.0"\n'})
+    _registry_update_setup(
+        monkeypatch, tmp_path, current_version="1.2.0", archive=archive, resolved_version="0.9.0"
+    )
+    body = _post(pack.update, name="regpack", version="0.9.0").json_body
+    assert body["ok"] is True
+    assert body["after_version"] == "0.9.0"
+
+
+def test_update_registry_pack_invalid_version_is_400(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    reg = root / "regpack"
+    reg.mkdir()
+    _write_pyproject(reg, name="regpack", version="1.0.0")
+    _set_roots(root)
+    resp = _post(pack.update, name="regpack", version="../bad")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "invalid_version"
+
+
+# ===========================================================================
 # POST /touch_manager/uninstall
 # ===========================================================================
 

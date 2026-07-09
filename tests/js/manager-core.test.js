@@ -173,6 +173,31 @@ describe("formatRef / formatUpdateStatus / formatCoreBehind", () => {
     ).toBe("error: boom");
   });
 
+  it("formats a registry pack's update status from its latest_version", () => {
+    expect(
+      formatUpdateStatus({
+        name: "x",
+        source: "registry",
+        update_available: true,
+        behind: 1,
+        ahead: 0,
+        error: null,
+        latest_version: "1.2.0",
+      }),
+    ).toBe("update available — v1.2.0");
+    expect(
+      formatUpdateStatus({
+        name: "x",
+        source: "registry",
+        update_available: false,
+        behind: 0,
+        ahead: 0,
+        error: null,
+        latest_version: null,
+      }),
+    ).toBe("up to date");
+  });
+
   it("formats core behind counts", () => {
     expect(formatCoreBehind({ origin: 0, upstream: 0 })).toBe("up to date");
     expect(formatCoreBehind({ origin: 2, upstream: null })).toBe("2 behind origin");
@@ -212,6 +237,34 @@ describe("update-result formatting", () => {
     expect(formatUpdateSummary(result({ commits_applied: 0 }))).toBe(
       "Already up to date — nothing to apply.",
     );
+  });
+
+  it("summarises a registry pack's version transition instead of SHAs", () => {
+    expect(
+      formatUpdateSummary(
+        result({
+          source: "registry",
+          before_short: null,
+          after_short: null,
+          before_version: "1.0.0",
+          after_version: "1.2.0",
+          changed_files: 0,
+        }),
+      ),
+    ).toBe("1.0.0 → 1.2.0");
+  });
+
+  it("collapses a no-op registry update to up-to-date", () => {
+    expect(
+      formatUpdateSummary(
+        result({
+          source: "registry",
+          commits_applied: 0,
+          before_version: "1.2.0",
+          after_version: "1.2.0",
+        }),
+      ),
+    ).toBe("Already up to date — nothing to apply.");
   });
 
   it("returns null for a deps record that never ran pip", () => {
@@ -380,17 +433,20 @@ describe("Comfy Registry helpers", () => {
   });
 });
 
-describe("filterPacks — fuzzy ranking over [name, remote_url]", () => {
+describe("filterPacks — fuzzy ranking over [name, remote_url, author]", () => {
   const packs = [
     {
       name: "comfyui-touch-numeric",
       remote_url: "https://github.com/laurigates/comfyui-touch-numeric",
+      author: "laurigates",
     },
     {
       name: "comfyui-sampler-info",
       remote_url: "https://github.com/laurigates/comfyui-sampler-info",
+      author: "laurigates",
     },
-    { name: "some-random-pack", remote_url: null },
+    { name: "some-random-pack", remote_url: null, author: "" },
+    { name: "regnode", remote_url: null, author: "octocat" },
   ];
 
   it("returns every pack sorted by name for an empty query", () => {
@@ -398,6 +454,7 @@ describe("filterPacks — fuzzy ranking over [name, remote_url]", () => {
     expect(out.map((r) => r.pack.name)).toEqual([
       "comfyui-sampler-info",
       "comfyui-touch-numeric",
+      "regnode",
       "some-random-pack",
     ]);
     expect(out.every((r) => r.primaryMatches.length === 0)).toBe(true);
@@ -415,6 +472,11 @@ describe("filterPacks — fuzzy ranking over [name, remote_url]", () => {
       "comfyui-sampler-info",
       "comfyui-touch-numeric",
     ]);
+  });
+
+  it("matches against the author field (e.g. a registry pack with no remote_url)", () => {
+    const out = filterPacks("octocat", packs);
+    expect(out.map((r) => r.pack.name)).toEqual(["regnode"]);
   });
 
   it("returns nothing when no field matches", () => {

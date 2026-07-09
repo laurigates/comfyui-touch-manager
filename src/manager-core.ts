@@ -23,6 +23,13 @@ export interface GitRef {
   sha: string | null;
 }
 
+/**
+ * How a pack got onto disk: a git checkout (fetch/checkout-based updates), a
+ * Comfy Registry archive extraction (version-compare-based updates, no git
+ * remote to fetch), or a plain directory this manager cannot update.
+ */
+type PackSource = "git" | "registry" | "unknown";
+
 /** One row of GET /touch_manager/installed. */
 export interface InstalledPack {
   name: string;
@@ -33,15 +40,25 @@ export interface InstalledPack {
   remote_url: string | null;
   dirty: boolean;
   enabled: boolean;
+  /** Git remote owner, else the registry PublisherId, else "". */
+  author: string;
+  source: PackSource;
+  /** The Comfy Registry node id (== pyproject `[project.name]`) when `source` is "registry". */
+  registry_id: string | null;
+  /** The pyproject `[project.version]` currently on disk when `source` is "registry". */
+  installed_version: string | null;
 }
 
 /** One row of GET /touch_manager/updates. */
 export interface UpdateInfo {
   name: string;
+  source: PackSource;
   update_available: boolean;
   behind: number;
   ahead: number;
   error: string | null;
+  /** The registry's latest published version, when `source` is "registry". */
+  latest_version: string | null;
 }
 
 /** One applied commit in an UpdateResult log. */
@@ -66,8 +83,12 @@ export interface DepsResult {
 /** The change detail returned by POST /touch_manager/update. */
 export interface UpdateResult {
   name: string;
+  source: PackSource;
   before_short: string | null;
   after_short: string | null;
+  /** Registry version transition (populated when `source` is "registry"). */
+  before_version: string | null;
+  after_version: string | null;
   commits_applied: number;
   commit_log: CommitLogEntry[];
   changed_files: number;
@@ -422,6 +443,11 @@ export function formatRef(ref: GitRef | null | undefined): string {
 export function formatUpdateStatus(info: UpdateInfo): string {
   if (info.error) return `error: ${info.error}`;
   if (info.update_available) {
+    if (info.source === "registry") {
+      return info.latest_version
+        ? `update available — v${info.latest_version}`
+        : "update available";
+    }
     const parts: string[] = [];
     if (info.behind > 0) parts.push(`${info.behind} behind`);
     if (info.ahead > 0) parts.push(`${info.ahead} ahead`);
@@ -432,12 +458,18 @@ export function formatUpdateStatus(info: UpdateInfo): string {
 }
 
 /**
- * One-line summary of what an update applied: short SHA transition, commit
+ * One-line summary of what an update applied. For a registry pack this is the
+ * version transition; for a git pack it's the short SHA transition, commit
  * count, and changed-file count. Collapses to "already up to date" when the
  * pack was already at the target (no commits applied).
  */
 export function formatUpdateSummary(r: UpdateResult): string {
   if (r.commits_applied === 0) return "Already up to date — nothing to apply.";
+  if (r.source === "registry") {
+    return r.before_version && r.after_version
+      ? `${r.before_version} → ${r.after_version}`
+      : "Updated.";
+  }
   const parts: string[] = [];
   if (r.before_short && r.after_short) parts.push(`${r.before_short} → ${r.after_short}`);
   const commits = `${r.commits_applied} commit${r.commits_applied === 1 ? "" : "s"}`;
@@ -547,7 +579,7 @@ export function versionOptions(info: Pick<VersionsInfo, "branches" | "tags">): s
 }
 
 // ============================================================
-// Fuzzy-filter glue (over [name, remote_url])
+// Fuzzy-filter glue (over [name, remote_url, author])
 // ============================================================
 
 /** A pack plus the fuzzy match indices on its primary (name) field. */
@@ -558,15 +590,16 @@ interface RankedPack<T> {
 }
 
 /**
- * Fuzzy-rank a pack list against a query over [name, remote_url]. An empty
- * query returns every pack (no matches), sorted by name ascending. A non-empty
- * query returns only matching packs, best score first, carrying the
- * primary-field match indices for highlighting.
+ * Fuzzy-rank a pack list against a query over [name, remote_url, author]. An
+ * empty query returns every pack (no matches), sorted by name ascending. A
+ * non-empty query returns only matching packs, best score first, carrying the
+ * primary-field (name) match indices for highlighting. `author` is a git
+ * remote owner or a registry PublisherId — matching it lets "by <author>"
+ * find every pack from that author regardless of repo/pack name.
  */
-export function filterPacks<T extends { name: string; remote_url?: string | null }>(
-  query: string,
-  packs: readonly T[],
-): RankedPack<T>[] {
+export function filterPacks<
+  T extends { name: string; remote_url?: string | null; author?: string | null },
+>(query: string, packs: readonly T[]): RankedPack<T>[] {
   const q = query.trim();
   if (!q) {
     return [...packs]
@@ -575,7 +608,7 @@ export function filterPacks<T extends { name: string; remote_url?: string | null
   }
   const scored: Array<{ pack: T; score: number; primaryMatches: number[] }> = [];
   for (const pack of packs) {
-    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null]);
+    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null, pack.author || null]);
     if (r) scored.push({ pack, score: r.score, primaryMatches: r.primaryMatches });
   }
   scored.sort((a, b) => b.score - a.score || a.pack.name.localeCompare(b.pack.name));

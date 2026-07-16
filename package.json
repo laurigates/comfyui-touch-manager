@@ -2,9 +2,9 @@
   "name": "comfyui-touch-manager",
   "private": true,
   "type": "module",
-  "description": "Touch-first node/extension manager for ComfyUI: check updates, update nodes and core, install from a GitHub URL, select versions, fuzzy search — mobile-friendly. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
+  "description": "Touch-first node/extension manager for ComfyUI: check updates, update nodes and core, install from a GitHub URL, select versions, fuzzy search \u2014 mobile-friendly. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
   "scripts": {
-    "build": "bun build ./src/index.ts --target browser --format esm --outdir web/dist --external '/scripts/*'",
+    "build": "bun build ./src/index.ts --target browser --format esm --banner '/* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */' --outdir web/dist --external '/scripts/*'",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

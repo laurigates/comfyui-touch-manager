@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.13...comfyui-touch-manager-v0.1.14) (2026-07-17)
+
+
+### Bug Fixes
+
+* **registry:** shrink registry tarball scan surface + hygiene guard ([#42](https://github.com/laurigates/comfyui-touch-manager/issues/42)) ([edc067c](https://github.com/laurigates/comfyui-touch-manager/commit/edc067cd92e3017a209e080a859675dcf9930801))
+
 ## [0.1.13](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.12...comfyui-touch-manager-v0.1.13) (2026-07-09)
 
 

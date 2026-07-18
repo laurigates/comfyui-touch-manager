@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.14...comfyui-touch-manager-v0.1.15) (2026-07-18)
+
+
+### Bug Fixes
+
+* **registry:** strengthen bundled-code provenance for vendored-file scan ([#46](https://github.com/laurigates/comfyui-touch-manager/issues/46)) ([92eaa2b](https://github.com/laurigates/comfyui-touch-manager/commit/92eaa2baae40ced2e59592693a3519c53bda3c78))
+
 ## [0.1.14](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.13...comfyui-touch-manager-v0.1.14) (2026-07-17)
 
 

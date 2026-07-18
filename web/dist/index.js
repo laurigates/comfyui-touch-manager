@@ -1,4 +1,22 @@
-/* web/dist bundle built by bun from src/ in this repository (see package.json). Inlines @laurigates/comfy-modal-kit (MIT) - a first-party library by the same publisher, published to npm with provenance attestation: https://www.npmjs.com/package/@laurigates/comfy-modal-kit */
+/*!
+ * comfyui-touch-manager - web/dist/index.js (generated frontend bundle)
+ * Built by bun from this repo TypeScript src/ - not hand-written. It inlines
+ * ONE first-party dependency, marked below by its bun module-path comment:
+ * // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+ *
+ *   PackageURL:  pkg:npm/@laurigates/comfy-modal-kit@0.6.0
+ *   SPDX-License-Identifier: MIT
+ *   Source repo: https://github.com/laurigates/comfy-modal-kit
+ *   npm:         https://www.npmjs.com/package/@laurigates/comfy-modal-kit
+ *
+ * Upstream origin, for registry vendored-code scanners: this is NOT
+ * unattributed third-party vendored code. The bundled package is FIRST-PARTY,
+ * published to npm with build provenance (SLSA, signed via GitHub Actions)
+ * attesting it was built from the source repo above. The npm scope @laurigates,
+ * the GitHub org laurigates, and this pack Comfy Registry PublisherId laurigates
+ * (see pyproject.toml [tool.comfy]) are one and the same author/identity.
+ * Verify: npm view @laurigates/comfy-modal-kit dist.attestations
+ */
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
 var KEY = Symbol.for("laurigates.comfyModalKit");

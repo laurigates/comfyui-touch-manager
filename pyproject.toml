@@ -22,6 +22,10 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/laurigates/comfyui-touch-manager"
 Issues = "https://github.com/laurigates/comfyui-touch-manager/issues"
+# web/dist/index.js inlines this first-party package (same author/PublisherId,
+# MIT, published to npm with build provenance). Declared here so the bundled
+# code's upstream origin is identifiable from the published tarball metadata.
+"Bundled code (comfy-modal-kit)" = "https://github.com/laurigates/comfy-modal-kit"
 
 [dependency-groups]
 dev = [

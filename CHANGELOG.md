@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.16](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.15...comfyui-touch-manager-v0.1.16) (2026-07-18)
+
+
+### Bug Fixes
+
+* **registry:** allow cdn.comfy.org archive host ([#45](https://github.com/laurigates/comfyui-touch-manager/issues/45)) ([f878ad0](https://github.com/laurigates/comfyui-touch-manager/commit/f878ad0f5e5a7b66f8666babcd8f0adb5c0c7a75))
+
 ## [0.1.15](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.14...comfyui-touch-manager-v0.1.15) (2026-07-18)
 
 

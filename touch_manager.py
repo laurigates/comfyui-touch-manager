@@ -92,9 +92,11 @@ REGISTRY_API = "https://api.comfy.org"
 REGISTRY_PAGE_SIZE = 24
 
 # Hosts a registry archive (downloadUrl) may come from. Tight + https-only: the
-# API itself and the GCS bucket it stores published archives in. Anything else
-# is refused and logged so the operator can extend this deliberately.
+# registry CDN (cdn.comfy.org) it now serves published archives from, the API
+# itself, and the GCS bucket the CDN fronts. Anything else is refused and logged
+# so the operator can extend this deliberately.
 ARCHIVE_ALLOWED_HOSTS = {
+    "cdn.comfy.org",
     "api.comfy.org",
     "storage.googleapis.com",
     "storage.cloud.google.com",

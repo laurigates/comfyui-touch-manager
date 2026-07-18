@@ -1186,8 +1186,10 @@ def test_core_update_deps_changed_false(tmp_path):
 @pytest.mark.parametrize(
     ("url", "ok"),
     [
+        ("https://cdn.comfy.org/pub/node/1.2.0/node.zip", True),
         ("https://api.comfy.org/x/y.zip", True),
         ("https://storage.googleapis.com/bucket/a.zip", True),
+        ("http://cdn.comfy.org/pub/node.zip", False),  # not https
         ("http://storage.googleapis.com/a.zip", False),  # not https
         ("https://github.com/owner/repo/archive/main.zip", False),  # host not allowed
         ("https://evil.example.com/a.zip", False),

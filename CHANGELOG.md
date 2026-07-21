@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.16...comfyui-touch-manager-v0.1.17) (2026-07-21)
+
+
+### Features
+
+* hoist updatable packs, enable/disable toggle, force-update, direct nav open ([#51](https://github.com/laurigates/comfyui-touch-manager/issues/51)) ([732fbef](https://github.com/laurigates/comfyui-touch-manager/commit/732fbef7f235e670f1727fed1b748634eeeacc0a))
+
 ## [0.1.16](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.15...comfyui-touch-manager-v0.1.16) (2026-07-18)
 
 

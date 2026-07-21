@@ -13,6 +13,7 @@ import {
   formatRegistryMeta,
   formatUpdateStatus,
   formatUpdateSummary,
+  hoistPacksWithUpdates,
   iconForKind,
   installPermitted,
   mergeVersionEntries,
@@ -484,6 +485,38 @@ describe("filterPacks — fuzzy ranking over [name, remote_url, author]", () => 
 
   it("returns nothing when no field matches", () => {
     expect(filterPacks("zzzznomatch", packs)).toEqual([]);
+  });
+});
+
+describe("hoistPacksWithUpdates — float updatable packs to the top", () => {
+  const ranked = (names) => names.map((name) => ({ pack: { name }, primaryMatches: [] }));
+
+  it("moves packs with an available update ahead of the rest", () => {
+    const withUpdate = new Set(["b", "d"]);
+    const out = hoistPacksWithUpdates(ranked(["a", "b", "c", "d"]), (n) => withUpdate.has(n));
+    expect(out.map((r) => r.pack.name)).toEqual(["b", "d", "a", "c"]);
+  });
+
+  it("is a stable partition — order within each group is preserved", () => {
+    const withUpdate = new Set(["c"]);
+    const out = hoistPacksWithUpdates(ranked(["a", "b", "c", "d", "e"]), (n) => withUpdate.has(n));
+    // "c" hoisted; a,b,d,e keep their relative order.
+    expect(out.map((r) => r.pack.name)).toEqual(["c", "a", "b", "d", "e"]);
+  });
+
+  it("is a no-op when nothing has an update (order unchanged)", () => {
+    const out = hoistPacksWithUpdates(ranked(["a", "b", "c"]), () => false);
+    expect(out.map((r) => r.pack.name)).toEqual(["a", "b", "c"]);
+  });
+
+  it("carries primaryMatches through untouched", () => {
+    const input = [
+      { pack: { name: "x" }, primaryMatches: [0, 1] },
+      { pack: { name: "y" }, primaryMatches: [2] },
+    ];
+    const out = hoistPacksWithUpdates(input, (n) => n === "y");
+    expect(out[0]).toEqual({ pack: { name: "y" }, primaryMatches: [2] });
+    expect(out[1]).toEqual({ pack: { name: "x" }, primaryMatches: [0, 1] });
   });
 });
 

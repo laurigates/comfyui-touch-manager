@@ -57,7 +57,9 @@ app.registerExtension({
   ...launcher,
 
   // Optionally register a sidebar tab as a third entry point. Feature-detect
-  // extensionManager (recent) and degrade silently if absent.
+  // extensionManager (recent) and degrade silently if absent. Selecting the
+  // vertical-nav icon opens the manager modal DIRECTLY — the panel it reveals is
+  // only a fallback (a re-open button), not an extra click on the happy path.
   setup() {
     try {
       const em = (app as { extensionManager?: { registerSidebarTab?: (t: unknown) => void } })
@@ -70,6 +72,12 @@ app.registerExtension({
         tooltip: "Touch Node Manager",
         render: (container: HTMLElement) => {
           container.replaceChildren();
+          // Open the modal as soon as the tab is shown, unless one is already up
+          // (the shell mounts a .cmp-dialog on the body) — so re-rendering the
+          // panel never stacks a second modal.
+          if (!document.querySelector(".cmp-dialog")) safeOpen();
+          // Fallback affordance: if the user dismissed the modal but the panel is
+          // still open, a button re-opens it without leaving the sidebar.
           const btn = document.createElement("button");
           btn.type = "button";
           btn.textContent = "Open Node Manager";
@@ -91,6 +99,7 @@ export {
   filterPacks,
   formatRef,
   formatUpdateStatus,
+  hoistPacksWithUpdates,
   sanitizePackName,
   validateInstallUrl,
   versionOptions,

@@ -22,7 +22,9 @@ are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
   GET  /touch_manager/versions    — branches/tags/releases for one pack
   POST /touch_manager/install     — clone a github/gitlab URL into roots[0]
   POST /touch_manager/update      — fetch + checkout/ff one pack, install deps
+                                    (``force`` discards local changes on a dirty tree)
   POST /touch_manager/uninstall   — reversible disable (rename to .disabled)
+  POST /touch_manager/enable      — re-enable a disabled pack (drop .disabled)
   GET  /touch_manager/core        — core repo ref/behind/dirty/remotes
   POST /touch_manager/core/update — git pull core; install deps on drift
   POST /touch_manager/reboot      — opt-in os.execv stub (disabled by default)
@@ -1044,7 +1046,9 @@ def _do_core_pull(cwd: str) -> tuple[int, bool, str]:
     return 0, deps_changed, ""
 
 
-def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | None, str, str]:
+def _do_pack_update(
+    full: str, safe_ref: str | None, force: bool = False
+) -> tuple[dict[str, Any] | None, str, str]:
     """Fetch then checkout/fast-forward one pack, capturing what changed.
 
     Returns (result, "", "") on success, or (None, error, code) on failure
@@ -1052,6 +1056,11 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
     before/after sha, the count + capped log of applied commits, the changed
     file count, and whether a dependency file changed. The sha range is built
     from values git produced — never caller input — so it is safe to interpolate.
+
+    ``force`` discards uncommitted changes to TRACKED files (``checkout -f`` for
+    an explicit ref, ``reset --hard`` to the upstream tip otherwise) so a pack
+    with a dirty working tree can still be updated. Untracked files are left in
+    place — force never runs ``git clean`` — so user-dropped files survive.
     """
     rc, before_out, _ = _git(["rev-parse", "HEAD"], full)
     before = before_out.strip() if rc == 0 else ""
@@ -1061,7 +1070,10 @@ def _do_pack_update(full: str, safe_ref: str | None) -> tuple[dict[str, Any] | N
         return None, err.strip() or "fetch failed", "fetch_failed"
 
     if safe_ref:
-        rc, _, err = _git(["checkout", safe_ref], full, timeout=60)
+        args = ["checkout", "-f", safe_ref] if force else ["checkout", safe_ref]
+        rc, _, err = _git(args, full, timeout=60)
+    elif force:
+        rc, _, err = _git(["reset", "--hard", "@{u}"], full, timeout=60)
     else:
         rc, _, err = _git(["merge", "--ff-only", "@{u}"], full, timeout=60)
     if rc != 0:
@@ -1475,7 +1487,8 @@ async def update(request: web.Request) -> web.Response:
         if ref and safe_ref is None:
             return _err("invalid ref", "checkout_failed", 400)
 
-        result, err, code = await _run(_do_pack_update, full, safe_ref)
+        force = bool(body.get("force"))
+        result, err, code = await _run(_do_pack_update, full, safe_ref, force)
         if result is None:
             return _err(err, code, 500)
         # Only reinstall when the update actually touched a dependency file — an
@@ -1515,6 +1528,37 @@ async def uninstall(request: web.Request) -> web.Response:
         os.rename(full, disabled)
     except OSError as exc:
         return _err(str(exc), "not_found", 500)
+
+    return web.json_response({"ok": True, "name": name, "restart_required": True})
+
+
+@PromptServer.instance.routes.post("/touch_manager/enable")
+async def enable(request: web.Request) -> web.Response:
+    """Re-enable a disabled pack by dropping the ``.disabled`` suffix.
+
+    The inverse of ``uninstall``: renames ``<name>.disabled`` back to ``<name>``
+    so ComfyUI imports it again on the next restart. Idempotent when the pack is
+    already enabled; refuses (409) when an enabled dir of the same name already
+    exists (renaming over it would clobber it).
+    """
+    body = await _body(request)
+    name = _sanitize_name(str(body.get("name", "")))
+    if not name:
+        return _err("not found", "not_found", 404)
+    full = _find_pack(name, include_disabled=True)
+    if not full:
+        return _err("not found", "not_found", 404)
+    if not full.endswith(_DISABLED_SUFFIX):
+        # Already enabled — nothing to do, and nothing to restart for.
+        return web.json_response({"ok": True, "name": name, "restart_required": False})
+
+    target = full[: -len(_DISABLED_SUFFIX)]
+    if os.path.exists(target):
+        return _err("a pack with that name is already enabled", "conflict", 409)
+    try:
+        os.rename(full, target)
+    except OSError as exc:
+        return _err(str(exc), "rename_failed", 500)
 
     return web.json_response({"ok": True, "name": name, "restart_required": True})
 

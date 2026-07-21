@@ -8,7 +8,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RECONNECT_POLL } from "../../src/manager-core.ts";
 import { openManager, reloadController } from "../../src/touch-manager-ui.ts";
-import { __fetchCalls, __fetchControl, __reset, __responses } from "./__mocks__/app.js";
+import {
+  __fetchBodies,
+  __fetchCalls,
+  __fetchControl,
+  __reset,
+  __responses,
+} from "./__mocks__/app.js";
 
 // Let queued microtasks + the deferred initial load settle.
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -149,7 +155,7 @@ describe("openManager (jsdom modal smoke)", () => {
     updateBtn?.click();
     for (let i = 0; i < 4; i++) await flush();
 
-    expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(true);
     // No transition: still the Installed list (row + Update button present),
     // re-fetched in place so the row shows the new ref — no back affordance.
     expect(installedFetches()).toBe(fetchesBefore + 1);
@@ -443,7 +449,7 @@ describe("openManager (jsdom modal smoke)", () => {
     [...alphaRow.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
     for (let i = 0; i < 6; i++) await flush();
 
-    expect(__fetchCalls.some((u) => u.includes("/touch_manager/update"))).toBe(true);
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(true);
     // No transition: the list refreshes in place — no Back affordance.
     expect(
       [...document.querySelectorAll("button")].some((b) => b.textContent?.startsWith("← Back")),
@@ -463,6 +469,156 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(checksAfter).toBe(checksBefore);
     // The restart notice surfaces without leaving the list.
     expect(document.body.textContent).toContain("Restart ComfyUI to apply");
+  });
+
+  // ----- hoist packs with updates to the top -----
+
+  it("hoists packs with an available update above the rest once the sweep finishes", async () => {
+    // "aaa" sorts first alphabetically but is current; "zzz" sorts last but has
+    // an update — after the sweep it should be hoisted to the top.
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [gitPack("aaa"), gitPack("zzz")],
+    };
+    __responses["/touch_manager/updates/list"] = {
+      ok: true,
+      packs: [{ name: "aaa" }, { name: "zzz" }],
+    };
+    __responses["/touch_manager/updates/check?name=aaa"] = {
+      ok: true,
+      name: "aaa",
+      update_available: false,
+      behind: 0,
+      ahead: 0,
+      error: null,
+      incoming: [],
+    };
+    __responses["/touch_manager/updates/check?name=zzz"] = {
+      ok: true,
+      name: "zzz",
+      update_available: true,
+      behind: 1,
+      ahead: 0,
+      error: null,
+      incoming: [],
+    };
+    openManager();
+    for (let i = 0; i < 12; i++) await flush();
+
+    const titles = [...document.querySelectorAll(".tm-list .tm-row-title")].map(
+      (t) => t.textContent,
+    );
+    expect(titles[0]).toContain("zzz"); // updatable pack floated to the top
+    expect(titles[1]).toContain("aaa");
+    expect(document.querySelectorAll(".tm-has-update").length).toBe(1);
+  });
+
+  // ----- enable / disable a pack -----
+
+  it("shows Enable (and no Update/Disable) for a disabled pack and posts /enable", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [{ ...gitPack("off-pack"), enabled: false }],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("off-pack"),
+    );
+    const labels = [...row.querySelectorAll("button")].map((b) => b.textContent);
+    expect(labels).toContain("Enable");
+    expect(labels).not.toContain("Disable");
+    expect(labels).not.toContain("Update");
+
+    [...row.querySelectorAll("button")].find((b) => b.textContent === "Enable")?.click();
+    for (let i = 0; i < 6; i++) await flush();
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/enable"))).toBe(true);
+  });
+
+  it("Disable on an enabled pack confirms in-modal, then posts /uninstall", async () => {
+    __responses["/touch_manager/installed"] = { ok: true, packs: [gitPack("on-pack")] };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("on-pack"),
+    );
+    [...row.querySelectorAll("button")].find((b) => b.textContent === "Disable")?.click();
+    await flush();
+
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    expect(overlay).toBeTruthy();
+    overlay.querySelector(".cmp-ov-danger").click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/uninstall"))).toBe(true);
+  });
+
+  // ----- force update on a dirty pack -----
+
+  it("offers Force/Cancel when updating a dirty pack and posts force:true when confirmed", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [{ ...gitPack("dirty-pack"), dirty: true }],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    __responses["/touch_manager/update"] = {
+      ok: true,
+      name: "dirty-pack",
+      before_short: "aaa1111",
+      after_short: "bbb2222",
+      commits_applied: 1,
+      commit_log: [],
+      changed_files: 1,
+      deps_changed: false,
+      truncated: false,
+    };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("dirty-pack"),
+    );
+    [...row.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
+    await flush();
+
+    // A danger Force/Cancel confirm is drawn in-modal before anything is posted.
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    expect(overlay).toBeTruthy();
+    expect(overlay.textContent).toContain("Force update");
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(false);
+
+    overlay.querySelector(".cmp-ov-danger").click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(true);
+    const call = __fetchBodies.find((c) => c.url.endsWith("/touch_manager/update"));
+    expect(call?.body?.force).toBe(true);
+  });
+
+  it("cancelling the dirty-pack Force prompt posts nothing", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [{ ...gitPack("dirty-pack"), dirty: true }],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("dirty-pack"),
+    );
+    [...row.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
+    await flush();
+
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    [...overlay.querySelectorAll("button")].find((b) => b.textContent === "Cancel")?.click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(false);
   });
 
   // ----- reconnect-and-reload after a restart -----

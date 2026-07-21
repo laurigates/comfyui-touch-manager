@@ -1109,6 +1109,14 @@ function filterPacks(query, packs) {
   scored.sort((a, b) => b.score - a.score || a.pack.name.localeCompare(b.pack.name));
   return scored.map(({ pack, primaryMatches }) => ({ pack, primaryMatches }));
 }
+function hoistPacksWithUpdates(ranked, hasUpdate) {
+  const withUpdate = [];
+  const withoutUpdate = [];
+  for (const entry of ranked) {
+    (hasUpdate(entry.pack.name) ? withUpdate : withoutUpdate).push(entry);
+  }
+  return [...withUpdate, ...withoutUpdate];
+}
 
 // src/touch-manager-ui.ts
 var EXT_NAME = "comfyui-touch-manager";
@@ -1350,7 +1358,7 @@ function renderInstalledList(state) {
   const section = resetBody(state);
   section.appendChild(installedHead(state));
   const query = state.shell.searchEl.value;
-  const ranked = filterPacks(query, state.installed);
+  const ranked = hoistPacksWithUpdates(filterPacks(query, state.installed), (name) => state.sweep?.results.get(name)?.update_available === true);
   state.shell.setStatus(`${ranked.length}/${state.installed.length}`);
   state.rowByName = new Map;
   if (ranked.length === 0) {
@@ -1410,19 +1418,21 @@ function installedRow(state, pack, matches) {
     row.appendChild(el("div", "tm-row-meta", pack.remote_url));
   row.appendChild(el("div", "tm-update-status"));
   const actions = el("div", "tm-row-actions");
-  const updatable = pack.is_git || pack.source === "registry";
-  const updateBtn = button("Update", "tm-update-btn", () => void doUpdate(state, pack.name, { origin: "installed" }));
-  updateBtn.disabled = !updatable;
-  if (!updatable)
-    updateBtn.title = "not a git repo or registry-installed pack";
-  actions.appendChild(updateBtn);
-  const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
-  versionsBtn.disabled = !pack.is_git;
-  if (!pack.is_git)
-    versionsBtn.title = "not a git repo";
-  actions.appendChild(versionsBtn);
   if (pack.enabled) {
-    actions.appendChild(button("Uninstall", "tm-btn-danger", () => void doUninstall(state, pack.name)));
+    const updatable = pack.is_git || pack.source === "registry";
+    const updateBtn = button("Update", "tm-update-btn", () => void doUpdate(state, pack.name, { origin: "installed" }));
+    updateBtn.disabled = !updatable;
+    if (!updatable)
+      updateBtn.title = "not a git repo or registry-installed pack";
+    actions.appendChild(updateBtn);
+    const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
+    versionsBtn.disabled = !pack.is_git;
+    if (!pack.is_git)
+      versionsBtn.title = "not a git repo";
+    actions.appendChild(versionsBtn);
+    actions.appendChild(button("Disable", "tm-btn-danger", () => void doDisable(state, pack.name)));
+  } else {
+    actions.appendChild(button("Enable", "tm-btn-primary", () => void doEnable(state, pack.name)));
   }
   row.appendChild(actions);
   applyUpdateStatus(state, row, pack);
@@ -1436,6 +1446,8 @@ function applyUpdateStatus(state, row, pack) {
   status.replaceChildren();
   row.classList.remove("tm-has-update");
   updateBtn?.classList.remove("tm-btn-primary");
+  if (!pack.enabled)
+    return;
   if (!pack.is_git && pack.source !== "registry")
     return;
   const info = state.sweep?.results.get(pack.name);
@@ -1477,10 +1489,24 @@ async function refreshInstalledList(state) {
     state.shell.bodyEl.scrollTop = top;
   });
 }
-async function doUpdate(state, name, opts = {}) {
+function confirmForceUpdate(state, name, fromDirty) {
+  return confirmInShell(state.shell, {
+    title: fromDirty ? "Pack has local changes" : "Update blocked by local changes",
+    message: fromDirty ? `"${name}" has uncommitted local changes. Updating will DISCARD them ` + "(git checkout -f / reset --hard; untracked files are kept). Force the update?" : `Updating "${name}" was blocked — the working tree likely has local changes. ` + "Force the update and discard them?",
+    confirmLabel: "Force update",
+    danger: true,
+    enterConfirms: true
+  });
+}
+async function attemptUpdate(state, name, opts) {
   state.shell.setBusy(true);
   try {
-    const result = await apiPost("update", opts.ref ? { name, ref: opts.ref } : { name });
+    const body = { name };
+    if (opts.ref)
+      body.ref = opts.ref;
+    if (opts.force)
+      body.force = true;
+    const result = await apiPost("update", body);
     markRestartPending(state);
     removeFromUpdatesCache(state, name);
     const deps = formatDepsResult(result.deps);
@@ -1488,17 +1514,36 @@ async function doUpdate(state, name, opts = {}) {
     if (opts.origin === "installed") {
       await refreshInstalledList(state);
     }
+    return null;
   } catch (e) {
     const err = e;
+    if (err.code === "checkout_failed" && !opts.force)
+      return "checkout_failed";
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+    return err.code ?? "error";
   } finally {
     state.shell.setBusy(false);
   }
 }
-async function doUninstall(state, name) {
+async function doUpdate(state, name, opts = {}) {
+  const pack = state.installed.find((p) => p.name === name);
+  let force = opts.force ?? false;
+  if (!force && pack?.is_git && pack.dirty) {
+    if (!await confirmForceUpdate(state, name, true))
+      return;
+    force = true;
+  }
+  const code = await attemptUpdate(state, name, { ...opts, force });
+  if (code === "checkout_failed" && !force) {
+    if (await confirmForceUpdate(state, name, false)) {
+      await attemptUpdate(state, name, { ...opts, force: true });
+    }
+  }
+}
+async function doDisable(state, name) {
   const ok = await confirmInShell(state.shell, {
     title: "Disable pack?",
-    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
+    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible — re-enable it from its row), not deleted. A restart is required.`,
     confirmLabel: "Disable",
     danger: true,
     enterConfirms: true
@@ -1514,7 +1559,22 @@ async function doUninstall(state, name) {
     await renderInstalledTab(state);
   } catch (e) {
     const err = e;
-    toast("error", `Uninstall failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+    toast("error", `Disable failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+async function doEnable(state, name) {
+  state.shell.setBusy(true);
+  try {
+    await apiPost("enable", { name });
+    markRestartPending(state);
+    state.sweep = null;
+    toast("success", `Enabled ${name}`, "Restart ComfyUI to apply.");
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e;
+    toast("error", `Enable failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
   } finally {
     state.shell.setBusy(false);
   }
@@ -1663,7 +1723,7 @@ async function startUpdateSweep(state) {
     return;
   sweep.complete = true;
   if (state.activeTab === "installed")
-    repaintUpdateStatuses(state);
+    renderInstalledList(state);
 }
 function repaintUpdateStatuses(state) {
   for (const [name, row] of state.rowByName) {
@@ -2093,6 +2153,8 @@ app2.registerExtension({
         tooltip: "Touch Node Manager",
         render: (container) => {
           container.replaceChildren();
+          if (!document.querySelector(".cmp-dialog"))
+            safeOpen();
           const btn = document.createElement("button");
           btn.type = "button";
           btn.textContent = "Open Node Manager";
@@ -2110,6 +2172,7 @@ export {
   versionOptions,
   validateInstallUrl,
   sanitizePackName,
+  hoistPacksWithUpdates,
   formatUpdateStatus,
   formatRef,
   filterPacks

@@ -9,6 +9,11 @@
 // Records every fetchApi(url) the code under test makes (assert on these).
 export const __fetchCalls = [];
 
+// Parallel record of {url, method, body} for each call, so a test can assert on
+// a POST's JSON body (e.g. the `force` flag) — kept separate from __fetchCalls
+// so its "array of URL strings" contract stays intact.
+export const __fetchBodies = [];
+
 // Mutable map: substring of the apiURL -> JSON body fetchApi resolves with.
 // Tests set entries before exercising the UI; unmatched routes resolve {ok:true}.
 export const __responses = {};
@@ -21,6 +26,7 @@ export const __fetchControl = { failNext: 0 };
 
 export function __reset() {
   __fetchCalls.length = 0;
+  __fetchBodies.length = 0;
   __fetchControl.failNext = 0;
   for (const k of Object.keys(__responses)) delete __responses[k];
 }
@@ -39,8 +45,15 @@ export const app = {
   },
   api: {
     apiURL: (path) => path,
-    fetchApi: async (url) => {
+    fetchApi: async (url, opts) => {
       __fetchCalls.push(url);
+      let reqBody;
+      try {
+        reqBody = opts?.body ? JSON.parse(opts.body) : undefined;
+      } catch {
+        reqBody = opts?.body;
+      }
+      __fetchBodies.push({ url: String(url), method: opts?.method ?? "GET", body: reqBody });
       if (__fetchControl.failNext > 0) {
         __fetchControl.failNext -= 1;
         throw new Error("network down");

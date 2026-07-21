@@ -4,8 +4,9 @@
 // command. It renders data from the /touch_manager/* backend routes into a
 // tabbed modal built on @laurigates/comfy-modal-kit's `openModalShell`.
 //
-// Tabs: Installed (fuzzy list + per-pack Update/Versions/Uninstall; the list
-// paints instantly and a background sweep lazily fills each git pack's
+// Tabs: Installed (fuzzy list + per-pack Update/Versions/Disable, or Enable for
+// a disabled pack; the list paints instantly, packs with an available update
+// float to the top, and a background sweep lazily fills each git pack's
 // available-update info into its row), Install (paste a github/gitlab URL —
 // gated by the backend bind policy), Registry (search + install from
 // registry.comfy.org, git or registry version), Core (core repo
@@ -36,6 +37,7 @@ import {
   formatRegistryMeta,
   formatUpdateStatus,
   formatUpdateSummary,
+  hoistPacksWithUpdates,
   type InstalledPack,
   type InstallResult,
   iconForKind,
@@ -424,7 +426,16 @@ function renderInstalledList(state: ManagerState): void {
   section.appendChild(installedHead(state));
 
   const query = state.shell.searchEl.value;
-  const ranked = filterPacks(query, state.installed);
+  // Fuzzy-rank (or name-sort) first, then hoist packs with a known available
+  // update to the top so the actionable rows lead. The hoist reads the sweep
+  // cache, so early on (before the sweep lands) it is a no-op and the list is
+  // simply name-ordered; a finished sweep repaints via renderInstalledList,
+  // which is when the reorder actually happens — never mid-stream, so rows do
+  // not jump around under the user while checks are still arriving.
+  const ranked = hoistPacksWithUpdates(
+    filterPacks(query, state.installed),
+    (name) => state.sweep?.results.get(name)?.update_available === true,
+  );
   state.shell.setStatus(`${ranked.length}/${state.installed.length}`);
 
   state.rowByName = new Map();
@@ -493,28 +504,30 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   row.appendChild(el("div", "tm-update-status"));
 
   const actions = el("div", "tm-row-actions");
-  // Update covers git packs (fetch/checkout) and registry-installed packs
-  // (re-download); the branches/tags/releases Versions picker is git-only.
-  const updatable = pack.is_git || pack.source === "registry";
-
-  const updateBtn = button(
-    "Update",
-    "tm-update-btn",
-    () => void doUpdate(state, pack.name, { origin: "installed" }),
-  );
-  updateBtn.disabled = !updatable;
-  if (!updatable) updateBtn.title = "not a git repo or registry-installed pack";
-  actions.appendChild(updateBtn);
-
-  const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
-  versionsBtn.disabled = !pack.is_git;
-  if (!pack.is_git) versionsBtn.title = "not a git repo";
-  actions.appendChild(versionsBtn);
-
   if (pack.enabled) {
-    actions.appendChild(
-      button("Uninstall", "tm-btn-danger", () => void doUninstall(state, pack.name)),
+    // Update covers git packs (fetch/checkout) and registry-installed packs
+    // (re-download); the branches/tags/releases Versions picker is git-only.
+    const updatable = pack.is_git || pack.source === "registry";
+
+    const updateBtn = button(
+      "Update",
+      "tm-update-btn",
+      () => void doUpdate(state, pack.name, { origin: "installed" }),
     );
+    updateBtn.disabled = !updatable;
+    if (!updatable) updateBtn.title = "not a git repo or registry-installed pack";
+    actions.appendChild(updateBtn);
+
+    const versionsBtn = button("Versions", "", () => void openVersions(state, pack));
+    versionsBtn.disabled = !pack.is_git;
+    if (!pack.is_git) versionsBtn.title = "not a git repo";
+    actions.appendChild(versionsBtn);
+
+    actions.appendChild(button("Disable", "tm-btn-danger", () => void doDisable(state, pack.name)));
+  } else {
+    // A disabled pack can't be updated (its dir is renamed aside, so the backend
+    // won't resolve it) — the only action is to re-enable it.
+    actions.appendChild(button("Enable", "tm-btn-primary", () => void doEnable(state, pack.name)));
   }
 
   row.appendChild(actions);
@@ -538,6 +551,7 @@ function applyUpdateStatus(state: ManagerState, row: HTMLElement, pack: Installe
   row.classList.remove("tm-has-update");
   updateBtn?.classList.remove("tm-btn-primary");
 
+  if (!pack.enabled) return; // disabled packs are not swept and have no Update btn
   if (!pack.is_git && pack.source !== "registry") return; // not part of the sweep
 
   const info = state.sweep?.results.get(pack.name);
@@ -571,6 +585,8 @@ interface UpdateOptions {
   ref?: string;
   /** Which list the action came from — picks what to repaint in place. */
   origin?: TabId;
+  /** Discard local changes on a dirty tree so the update can proceed. */
+  force?: boolean;
 }
 
 /** Drop a pack from the cached update sweep (it is now at its target). */
@@ -598,17 +614,47 @@ async function refreshInstalledList(state: ManagerState): Promise<void> {
   });
 }
 
-async function doUpdate(
+/**
+ * Confirm a forced update that will discard a pack's local changes. `fromDirty`
+ * distinguishes the proactive prompt (we already know the tree is dirty) from
+ * the reactive one (the update was blocked, likely by local changes).
+ */
+function confirmForceUpdate(
   state: ManagerState,
   name: string,
-  opts: UpdateOptions = {},
-): Promise<void> {
+  fromDirty: boolean,
+): Promise<boolean> {
+  return confirmInShell(state.shell, {
+    title: fromDirty ? "Pack has local changes" : "Update blocked by local changes",
+    message: fromDirty
+      ? `"${name}" has uncommitted local changes. Updating will DISCARD them ` +
+        "(git checkout -f / reset --hard; untracked files are kept). Force the update?"
+      : `Updating "${name}" was blocked — the working tree likely has local changes. ` +
+        "Force the update and discard them?",
+    confirmLabel: "Force update",
+    danger: true,
+    enterConfirms: true,
+  });
+}
+
+/**
+ * One update attempt. Returns the backend error `code` on failure (so the caller
+ * can react — notably `"checkout_failed"`, which a force retry can clear) or null
+ * on success. A `checkout_failed` on a non-forced attempt is returned WITHOUT a
+ * toast, since the caller offers a forced retry instead; every other failure
+ * toasts here.
+ */
+async function attemptUpdate(
+  state: ManagerState,
+  name: string,
+  opts: UpdateOptions,
+): Promise<string | null> {
   state.shell.setBusy(true);
   try {
-    const result = await apiPost<UpdateResult>(
-      "update",
-      opts.ref ? { name, ref: opts.ref } : { name },
-    );
+    const body: Record<string, unknown> = { name };
+    if (opts.ref) body.ref = opts.ref;
+    if (opts.force) body.force = true;
+    const result = await apiPost<UpdateResult>("update", body);
     markRestartPending(state);
     // The pack is now at its target — keep the cached sweep honest so it does
     // not keep advertising an update for a pack we just updated.
@@ -626,18 +672,49 @@ async function doUpdate(
     if (opts.origin === "installed") {
       await refreshInstalledList(state);
     }
+    return null;
   } catch (e) {
     const err = e as ManagerError;
+    if (err.code === "checkout_failed" && !opts.force) return "checkout_failed";
     toast("error", `Update failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+    return err.code ?? "error";
   } finally {
     state.shell.setBusy(false);
   }
 }
 
-async function doUninstall(state: ManagerState, name: string): Promise<void> {
+/**
+ * Update one pack, handling a dirty working tree by offering the user Cancel or
+ * Force. A pack we already know is dirty prompts BEFORE the attempt; a
+ * `checkout_failed` on a clean-looking pack (dirtied since the last listing)
+ * prompts a forced retry. Force discards local changes to tracked files.
+ */
+async function doUpdate(
+  state: ManagerState,
+  name: string,
+  opts: UpdateOptions = {},
+): Promise<void> {
+  const pack = state.installed.find((p) => p.name === name);
+  let force = opts.force ?? false;
+  if (!force && pack?.is_git && pack.dirty) {
+    if (!(await confirmForceUpdate(state, name, true))) return; // user cancelled
+    force = true;
+  }
+
+  const code = await attemptUpdate(state, name, { ...opts, force });
+  // A non-forced attempt blocked by local changes: give the reactive Cancel/Force
+  // choice, then retry forced if the user confirms.
+  if (code === "checkout_failed" && !force) {
+    if (await confirmForceUpdate(state, name, false)) {
+      await attemptUpdate(state, name, { ...opts, force: true });
+    }
+  }
+}
+
+async function doDisable(state: ManagerState, name: string): Promise<void> {
   const ok = await confirmInShell(state.shell, {
     title: "Disable pack?",
-    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible), not deleted. A restart is required.`,
+    message: `Disable "${name}"? The directory is renamed to "${name}.disabled" (reversible — re-enable it from its row), not deleted. A restart is required.`,
     confirmLabel: "Disable",
     danger: true,
     enterConfirms: true,
@@ -653,11 +730,26 @@ async function doUninstall(state: ManagerState, name: string): Promise<void> {
     await renderInstalledTab(state);
   } catch (e) {
     const err = e as ManagerError;
-    toast(
-      "error",
-      `Uninstall failed: ${name}`,
-      `${err.message}${err.code ? ` (${err.code})` : ""}`,
-    );
+    toast("error", `Disable failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+
+/** Re-enable a disabled pack (backend drops the ``.disabled`` suffix). */
+async function doEnable(state: ManagerState, name: string): Promise<void> {
+  state.shell.setBusy(true);
+  try {
+    await apiPost("enable", { name });
+    markRestartPending(state);
+    // The pack set changed — the cached updates sweep is now stale (the newly
+    // enabled pack should be swept on the next check).
+    state.sweep = null;
+    toast("success", `Enabled ${name}`, "Restart ComfyUI to apply.");
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e as ManagerError;
+    toast("error", `Enable failed: ${name}`, `${err.message}${err.code ? ` (${err.code})` : ""}`);
   } finally {
     state.shell.setBusy(false);
   }
@@ -806,6 +898,8 @@ async function startUpdateSweep(state: ManagerState): Promise<void> {
   sweep.total = names.length;
   if (names.length === 0) {
     sweep.complete = true;
+    // No updatable packs — nothing to hoist; just refresh the "All up to date"
+    // head. A full re-render would needlessly rebuild the whole list.
     if (state.activeTab === "installed") repaintUpdateStatuses(state);
     return;
   }
@@ -847,7 +941,10 @@ async function startUpdateSweep(state: ManagerState): Promise<void> {
 
   if (state.sweep !== sweep) return; // superseded
   sweep.complete = true;
-  if (state.activeTab === "installed") repaintUpdateStatuses(state);
+  // The sweep is done: repaint the whole list so packs with an available update
+  // float to the top (hoist). This is the single, predictable reorder — the
+  // per-check patches above stayed in place so nothing jumped mid-stream.
+  if (state.activeTab === "installed") renderInstalledList(state);
 }
 
 /** Re-apply the sweep's status to every rendered row and refresh the head. */

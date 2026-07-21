@@ -621,7 +621,7 @@ export function versionOptions(info: Pick<VersionsInfo, "branches" | "tags">): s
 // ============================================================
 
 /** A pack plus the fuzzy match indices on its primary (name) field. */
-interface RankedPack<T> {
+export interface RankedPack<T> {
   pack: T;
   /** Indices into `pack.name` that matched, for highlighting. */
   primaryMatches: number[];
@@ -651,4 +651,23 @@ export function filterPacks<
   }
   scored.sort((a, b) => b.score - a.score || a.pack.name.localeCompare(b.pack.name));
   return scored.map(({ pack, primaryMatches }) => ({ pack, primaryMatches }));
+}
+
+/**
+ * Hoist packs with an available update to the top of an already-ordered list,
+ * preserving the relative order within each group (stable partition). The order
+ * a row already has — fuzzy score, then name — is kept inside the "has update"
+ * and "no update" buckets, so the only movement is updatable packs floating up.
+ * `hasUpdate` is called once per pack (typically a lookup into the sweep cache).
+ */
+export function hoistPacksWithUpdates<T extends { name: string }>(
+  ranked: readonly RankedPack<T>[],
+  hasUpdate: (name: string) => boolean,
+): RankedPack<T>[] {
+  const withUpdate: RankedPack<T>[] = [];
+  const withoutUpdate: RankedPack<T>[] = [];
+  for (const entry of ranked) {
+    (hasUpdate(entry.pack.name) ? withUpdate : withoutUpdate).push(entry);
+  }
+  return [...withUpdate, ...withoutUpdate];
 }

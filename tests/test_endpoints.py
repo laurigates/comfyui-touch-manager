@@ -774,6 +774,73 @@ def test_update_rejects_option_injection_ref_before_fetch(monkeypatch, tmp_path)
     assert "fetch" not in calls and "checkout" not in calls  # neither ran
 
 
+def test_update_dirty_tree_blocks_without_force(tmp_path):
+    # A dirty tree whose local edit conflicts with the incoming update blocks a
+    # non-forced fast-forward (the frontend then offers Cancel or Force).
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed)  # origin advances README to c2
+    (root / "pack" / "README.md").write_text("uncommitted local edit\n")
+    _set_roots(root)
+    assert pack._is_dirty(str(root / "pack")) is True
+
+    resp = _post(pack.update, name="pack")
+    assert resp.status == 500
+    assert resp.json_body["code"] == "checkout_failed"
+    # Nothing was applied — the local edit is intact.
+    assert (root / "pack" / "README.md").read_text() == "uncommitted local edit\n"
+
+
+def test_update_force_discards_local_changes_and_fast_forwards(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")
+    _advance(seed)
+    (root / "pack" / "README.md").write_text("uncommitted local edit\n")
+    _set_roots(root)
+
+    resp = _post(pack.update, name="pack", force=True)
+    assert resp.status == 200
+    assert resp.json_body["commits_applied"] == 1
+    # The local edit was discarded; the pack now matches origin's tip.
+    assert pack._is_dirty(str(root / "pack")) is False
+    assert (root / "pack" / "README.md").read_text() == "c2\n"
+
+
+def test_update_force_checks_out_ref_on_dirty_tree(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    seed = tmp_path / "seed"
+    _init_seed(seed, origin)
+    _clone(origin, root / "pack")  # pack at c1 (README = "c1")
+    # Tag a LATER commit so the target ref differs in README from the local tree.
+    _advance(seed)  # origin README -> c2
+    _git(seed, "tag", "v9.9.9")
+    _git(seed, "push", "origin", "v9.9.9")
+    (root / "pack" / "README.md").write_text("dirty\n")
+    _set_roots(root)
+
+    # A plain checkout is blocked by the conflicting local change; force (-f)
+    # discards it and lands on the tag.
+    assert _post(pack.update, name="pack", ref="v9.9.9").status == 500
+    resp = _post(pack.update, name="pack", ref="v9.9.9", force=True)
+    assert resp.status == 200
+    ref = pack._parse_ref(str(root / "pack"))
+    assert ref["type"] == "tag" and ref["name"] == "v9.9.9"
+    assert pack._is_dirty(str(root / "pack")) is False
+
+
 # ===========================================================================
 # Author + registry-source metadata (feeds /installed and the update flow)
 # ===========================================================================
@@ -1094,6 +1161,66 @@ def test_uninstall_rejects_unsafe_name(tmp_path):
     root.mkdir()
     _set_roots(root)
     resp = _post(pack.uninstall, name="../escape")
+    assert resp.status == 404
+    assert resp.json_body["code"] == "not_found"
+
+
+# ===========================================================================
+# POST /touch_manager/enable
+# ===========================================================================
+
+
+def test_enable_renames_from_disabled(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "pack.disabled").mkdir()
+    _set_roots(root)
+    resp = _post(pack.enable, name="pack")
+    assert resp.status == 200
+    assert resp.json_body["ok"] is True
+    assert resp.json_body["restart_required"] is True
+    assert (root / "pack").is_dir()
+    assert not (root / "pack.disabled").exists()
+
+
+def test_enable_round_trips_with_uninstall(tmp_path):
+    # Disable then enable returns the pack to its original enabled directory.
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "pack").mkdir()
+    _set_roots(root)
+    assert _post(pack.uninstall, name="pack").status == 200
+    assert (root / "pack.disabled").is_dir()
+    assert _post(pack.enable, name="pack").status == 200
+    assert (root / "pack").is_dir()
+    assert not (root / "pack.disabled").exists()
+
+
+def test_enable_already_enabled_is_noop(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "pack").mkdir()
+    _set_roots(root)
+    resp = _post(pack.enable, name="pack")
+    assert resp.status == 200
+    assert resp.json_body["restart_required"] is False
+    assert (root / "pack").is_dir()
+
+
+def test_enable_not_found(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+    resp = _post(pack.enable, name="ghost")
+    assert resp.status == 404
+    assert resp.json_body["code"] == "not_found"
+
+
+def test_enable_rejects_unsafe_name(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+    resp = _post(pack.enable, name="../escape")
     assert resp.status == 404
     assert resp.json_body["code"] == "not_found"
 

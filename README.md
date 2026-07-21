@@ -30,21 +30,25 @@ Restart ComfyUI; hard-refresh the browser tab (Ctrl+Shift+R / Cmd+Shift+R).
 
 A full-screen, touch-first modal for managing custom-node packs from the
 ComfyUI canvas — opened from a top action-bar button, the command palette
-("Touch Node Manager"), the Extensions menu, or an optional sidebar tab. It's
-built for phones and tablets: big tap targets, 16px inputs (no iOS zoom),
-momentum scroll, and a fuzzy filter on every list. Four tabs:
+("Touch Node Manager"), the Extensions menu, or the sidebar's vertical-nav icon
+(which opens the modal directly). It's built for phones and tablets: big tap
+targets, 16px inputs (no iOS zoom), momentum scroll, and a fuzzy filter on every
+list. Four tabs:
 
 - **Installed** — every pack across all `custom_nodes` roots, with its current
   git ref (or registry version), its author, whether it has local changes, and
-  its remote. Per-pack **Update**, **Versions**, and **Uninstall** actions —
-  **Update** works for both git-backed packs (fetch + fast-forward) and packs
-  installed from the Comfy Registry (re-downloads the latest published
-  version). Fuzzy search by name, author, or remote URL. The list paints
-  instantly; a background sweep then checks each updatable pack (a few at a
-  time) — a git fetch, or a registry version comparison — and fills its
-  **available update** inline on the row. Results are cached, so updating one
-  pack doesn't re-check everything; a **Re-check updates** button reruns the
-  sweep on demand.
+  its remote. Per-pack **Update**, **Versions**, and **Disable** actions (a
+  disabled pack instead offers **Enable**, restoring it) — **Update** works for
+  both git-backed packs (fetch + fast-forward) and packs installed from the
+  Comfy Registry (re-downloads the latest published version). Updating a pack
+  with **local changes** prompts before touching it: cancel, or **Force update**
+  to discard the changes and proceed. Fuzzy search by name, author, or remote
+  URL. The list paints instantly; a background sweep then checks each updatable
+  pack (a few at a time) — a git fetch, or a registry version comparison — and
+  fills its **available update** inline on the row. **Packs with an available
+  update float to the top** once the sweep finishes. Results are cached, so
+  updating one pack doesn't re-check everything; a **Re-check updates** button
+  reruns the sweep on demand.
 - **Install URL** — paste a GitHub/GitLab URL to clone a pack into
   `custom_nodes`. Gated by the server's bind policy (loopback by default; a
   non-loopback bind requires the `TOUCH_MANAGER_ALLOW_REMOTE_INSTALL` server

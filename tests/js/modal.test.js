@@ -41,6 +41,7 @@ describe("openManager (jsdom modal smoke)", () => {
       is_loopback: true,
       manager_enabled: false,
       reboot_allowed: true,
+      delete_allowed: true,
     };
     __responses["/touch_manager/installed"] = {
       ok: true,
@@ -619,6 +620,238 @@ describe("openManager (jsdom modal smoke)", () => {
     for (let i = 0; i < 6; i++) await flush();
 
     expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/update"))).toBe(false);
+  });
+
+  // ----- permanent delete -----
+
+  it("Delete confirms in-modal (no Enter shortcut) and posts /delete", async () => {
+    __responses["/touch_manager/installed"] = { ok: true, packs: [gitPack("doomed-pack")] };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("doomed-pack"),
+    );
+    [...row.querySelectorAll("button")].find((b) => b.textContent === "Delete")?.click();
+    await flush();
+
+    // Nothing is posted until the danger confirm is tapped, and the copy names
+    // the reversible alternative.
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    expect(overlay).toBeTruthy();
+    expect(overlay.textContent).toContain("CANNOT be undone");
+    expect(overlay.textContent).toContain("Disable");
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/delete"))).toBe(false);
+
+    overlay.querySelector(".cmp-ov-danger").click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/delete"))).toBe(true);
+    const call = __fetchBodies.find((c) => c.url.endsWith("/touch_manager/delete"));
+    expect(call?.body?.name).toBe("doomed-pack");
+    expect(document.body.textContent).toContain("Restart ComfyUI to apply");
+  });
+
+  it("offers Delete on a disabled pack too", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [{ ...gitPack("off-pack"), enabled: false }],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const row = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("off-pack"),
+    );
+    const labels = [...row.querySelectorAll("button")].map((b) => b.textContent);
+    expect(labels).toEqual(["Enable", "Delete"]);
+  });
+
+  it("hides Delete entirely when the backend gate refuses it", async () => {
+    __responses["/touch_manager/config"] = {
+      ok: true,
+      allow_remote_install: false,
+      is_loopback: false,
+      manager_enabled: false,
+      reboot_allowed: false,
+      delete_allowed: false,
+    };
+    __responses["/touch_manager/installed"] = { ok: true, packs: [gitPack("safe-pack")] };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const labels = [...document.querySelectorAll(".tm-row button")].map((b) => b.textContent);
+    expect(labels).not.toContain("Delete");
+    expect(labels).toContain("Disable"); // the reversible action stays
+  });
+
+  // ----- switching to a different fork -----
+
+  const forkRepo = (full_name, over = {}) => ({
+    full_name,
+    owner: full_name.split("/")[0],
+    url: `https://github.com/${full_name}`,
+    description: "",
+    stars: 0,
+    pushed_at: null,
+    archived: false,
+    ...over,
+  });
+
+  const openForkPicker = async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [gitPack("comfyui-touch-resize")],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    __responses["/touch_manager/forks"] = {
+      ok: true,
+      name: "comfyui-touch-resize",
+      current: "https://github.com/laurigates/comfyui-touch-resize",
+      parent: forkRepo("upstream-org/comfyui-touch-resize", { stars: 400 }),
+      source: null,
+      forks: [
+        forkRepo("laurigates/comfyui-touch-resize", { stars: 7 }),
+        forkRepo("someone/comfyui-touch-resize", { stars: 12, pushed_at: "2026-06-01T00:00:00Z" }),
+      ],
+    };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Forks")?.click();
+    for (let i = 0; i < 6; i++) await flush();
+  };
+
+  it("opens the fork picker, marks the current remote, and lists upstream first", async () => {
+    await openForkPicker();
+
+    expect(__fetchCalls.some((u) => u.includes("/touch_manager/forks"))).toBe(true);
+    expect(document.body.textContent).toContain("Forks — comfyui-touch-resize");
+
+    const titles = [...document.querySelectorAll(".tm-list .tm-row-title")].map(
+      (t) => t.textContent,
+    );
+    expect(titles[0]).toBe("upstream-org/comfyui-touch-resize");
+    expect(titles).toContain("someone/comfyui-touch-resize");
+
+    // The repo the pack already tracks is not offered as a switch target.
+    const currentRow = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("laurigates/comfyui-touch-resize"),
+    );
+    expect(currentRow.textContent).toContain("Already tracking this repository.");
+    expect([...currentRow.querySelectorAll("button")]).toHaveLength(0);
+  });
+
+  it("switches to a chosen fork: confirms, posts /remote, returns to the list", async () => {
+    await openForkPicker();
+    __responses["/touch_manager/remote"] = {
+      ok: true,
+      name: "comfyui-touch-resize",
+      remote_before: "https://github.com/laurigates/comfyui-touch-resize",
+      remote_after: "https://github.com/upstream-org/comfyui-touch-resize",
+      ref: "main",
+      before_short: "abc1234",
+      after_short: "def5678",
+      changed_files: 4,
+      deps_changed: false,
+      deps: { attempted: false, ok: null, sources: [], error: null, log: "" },
+    };
+
+    const upstreamRow = [...document.querySelectorAll(".tm-row")].find((r) =>
+      r.textContent.includes("upstream-org/comfyui-touch-resize"),
+    );
+    [...upstreamRow.querySelectorAll("button")].find((b) => b.textContent === "Switch")?.click();
+    await flush();
+
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    expect(overlay).toBeTruthy();
+    expect(overlay.textContent).toContain("upstream-org/comfyui-touch-resize");
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/remote"))).toBe(false);
+
+    overlay.querySelector(".cmp-ov-danger").click();
+    for (let i = 0; i < 8; i++) await flush();
+
+    const call = __fetchBodies.find((c) => c.url.endsWith("/touch_manager/remote"));
+    expect(call?.body).toMatchObject({
+      name: "comfyui-touch-resize",
+      url: "https://github.com/upstream-org/comfyui-touch-resize",
+    });
+    expect(call?.body?.force).toBeUndefined();
+    // Back on the Installed list, with the restart notice raised.
+    expect(document.body.textContent).toContain("Restart ComfyUI to apply");
+    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "Update")).toBe(
+      true,
+    );
+  });
+
+  it("prompts to discard local changes before switching a dirty pack", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [{ ...gitPack("comfyui-touch-resize"), dirty: true }],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    __responses["/touch_manager/forks"] = {
+      ok: true,
+      name: "comfyui-touch-resize",
+      current: "https://github.com/laurigates/comfyui-touch-resize",
+      parent: forkRepo("upstream-org/comfyui-touch-resize"),
+      source: null,
+      forks: [],
+    };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Forks")?.click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    [...document.querySelectorAll(".tm-row button")]
+      .find((b) => b.textContent === "Switch")
+      ?.click();
+    await flush();
+    // First confirm: the switch itself.
+    document.querySelector(".cmp-ov-backdrop .cmp-ov-danger")?.click();
+    await flush();
+    // Second confirm: discarding the local changes — nothing posted until then.
+    const overlay = document.querySelector(".cmp-ov-backdrop");
+    expect(overlay.textContent).toContain("DISCARD");
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/remote"))).toBe(false);
+
+    overlay.querySelector(".cmp-ov-danger").click();
+    for (let i = 0; i < 8; i++) await flush();
+    const call = __fetchBodies.find((c) => c.url.endsWith("/touch_manager/remote"));
+    expect(call?.body?.force).toBe(true);
+  });
+
+  it("keeps a paste-a-URL fallback when GitHub returns no forks", async () => {
+    __responses["/touch_manager/installed"] = { ok: true, packs: [gitPack("lonely-pack")] };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    __responses["/touch_manager/forks"] = {
+      ok: true,
+      name: "lonely-pack",
+      current: "https://gitlab.com/someone/lonely-pack",
+      parent: null,
+      source: null,
+      forks: [],
+    };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Forks")?.click();
+    for (let i = 0; i < 6; i++) await flush();
+
+    expect(document.body.textContent).toContain("No forks found");
+    const urlInput = [...document.querySelectorAll("input")].find(
+      (i) => i.placeholder === "https://github.com/owner/repo",
+    );
+    expect(urlInput).toBeTruthy();
+    const manual = [...document.querySelectorAll("button")].find(
+      (b) => b.textContent === "Switch to this repository",
+    );
+    // Disabled until a valid, allowlisted URL is entered.
+    expect(manual.disabled).toBe(true);
+    urlInput.value = "https://github.com/other/lonely-pack";
+    urlInput.dispatchEvent(new Event("input"));
+    expect(manual.disabled).toBe(false);
   });
 
   // ----- reconnect-and-reload after a restart -----

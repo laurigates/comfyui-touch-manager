@@ -3,14 +3,18 @@ import { describe, expect, it } from "vitest";
 // stay in lockstep with the Python backend (URL gate, ref/version formatting)
 // plus the fuzzy-filter glue. No DOM — runs in the node environment.
 import {
+  buildForkEntries,
+  deletePermitted,
   filterPacks,
   formatCoreBehind,
   formatDepsResult,
   formatDownloads,
+  formatForkMeta,
   formatProgress,
   formatReconnectStatus,
   formatRef,
   formatRegistryMeta,
+  formatRemoteSwitchSummary,
   formatUpdateStatus,
   formatUpdateSummary,
   hoistPacksWithUpdates,
@@ -18,10 +22,13 @@ import {
   installPermitted,
   mergeVersionEntries,
   normalizeRegistryNode,
+  normalizeRepoUrl,
   partitionUpdateResults,
   RECONNECT_POLL,
   rebootPermitted,
   reconnectExpired,
+  repoLabel,
+  sameRepo,
   sanitizePackName,
   sortBranches,
   sortTags,
@@ -542,5 +549,190 @@ describe("reconnect-after-restart poll helpers", () => {
 
   it("formatReconnectStatus switches to a took-longer message past the timeout", () => {
     expect(formatReconnectStatus(10000, 10000)).toMatch(/longer than expected/);
+  });
+});
+
+describe("deletePermitted — mirror of the backend /delete gate", () => {
+  const cfg = (delete_allowed) => ({
+    allow_remote_install: false,
+    is_loopback: false,
+    manager_enabled: false,
+    reboot_allowed: false,
+    delete_allowed,
+  });
+
+  it("offers delete when the backend reports the gate open", () => {
+    expect(deletePermitted(cfg(true))).toBe(true);
+  });
+
+  it("hides delete when the backend reports it closed", () => {
+    expect(deletePermitted(cfg(false))).toBe(false);
+  });
+
+  it("hides delete until config loads — never show an irreversible button on a guess", () => {
+    expect(deletePermitted(null)).toBe(false);
+  });
+});
+
+describe("normalizeRepoUrl / sameRepo / repoLabel", () => {
+  it("collapses the spellings of one repository to a single identity", () => {
+    const canonical = "github.com/laurigates/comfyui-touch-manager";
+    for (const url of [
+      "https://github.com/laurigates/comfyui-touch-manager",
+      "https://github.com/laurigates/comfyui-touch-manager.git",
+      "https://github.com/laurigates/comfyui-touch-manager/",
+      "https://github.com/Laurigates/ComfyUI-Touch-Manager",
+      "git@github.com:laurigates/comfyui-touch-manager.git",
+      "ssh://git@github.com/laurigates/comfyui-touch-manager",
+    ]) {
+      expect(normalizeRepoUrl(url)).toBe(canonical);
+    }
+  });
+
+  it("keeps different owners (and different hosts) distinct", () => {
+    expect(sameRepo("https://github.com/a/pack", "https://github.com/b/pack")).toBe(false);
+    expect(sameRepo("https://github.com/a/pack", "https://gitlab.com/a/pack")).toBe(false);
+    expect(sameRepo("https://github.com/a/pack", "git@github.com:a/pack.git")).toBe(true);
+  });
+
+  it("treats a missing remote as matching nothing (not even another missing one)", () => {
+    expect(sameRepo(null, null)).toBe(false);
+    expect(sameRepo("", "https://github.com/a/pack")).toBe(false);
+  });
+
+  it("repoLabel shortens a URL to owner/repo", () => {
+    expect(repoLabel("https://github.com/laurigates/comfyui-touch-manager.git")).toBe(
+      "laurigates/comfyui-touch-manager",
+    );
+    expect(repoLabel(null)).toBe("");
+  });
+});
+
+describe("buildForkEntries — fork-picker ordering", () => {
+  const repo = (full_name, over = {}) => ({
+    full_name,
+    owner: full_name.split("/")[0],
+    url: `https://github.com/${full_name}`,
+    description: "",
+    stars: 0,
+    pushed_at: null,
+    archived: false,
+    ...over,
+  });
+
+  it("puts upstream first, then forks by stars descending", () => {
+    const entries = buildForkEntries({
+      name: "pack",
+      current: "https://github.com/me/pack",
+      parent: repo("upstream/pack"),
+      source: null,
+      forks: [repo("small/pack", { stars: 2 }), repo("big/pack", { stars: 99 })],
+    });
+    expect(entries.map((e) => e.repo.full_name)).toEqual([
+      "upstream/pack",
+      "big/pack",
+      "small/pack",
+    ]);
+    expect(entries.map((e) => e.role)).toEqual(["upstream", "fork", "fork"]);
+  });
+
+  it("tags the pack's current remote so the UI can refuse a no-op switch", () => {
+    const entries = buildForkEntries({
+      name: "pack",
+      current: "git@github.com:me/pack.git", // a different spelling of the same repo
+      parent: repo("upstream/pack"),
+      source: null,
+      forks: [repo("me/pack"), repo("other/pack")],
+    });
+    const byName = Object.fromEntries(entries.map((e) => [e.repo.full_name, e.role]));
+    expect(byName["me/pack"]).toBe("current");
+    expect(byName["upstream/pack"]).toBe("upstream");
+    expect(byName["other/pack"]).toBe("fork");
+  });
+
+  it("marks upstream as current when the pack already tracks it", () => {
+    const entries = buildForkEntries({
+      name: "pack",
+      current: "https://github.com/upstream/pack",
+      parent: repo("upstream/pack"),
+      source: null,
+      forks: [repo("upstream/pack")],
+    });
+    expect(entries).toHaveLength(1); // deduped: listed as both parent and fork
+    expect(entries[0].role).toBe("current");
+  });
+
+  it("dedupes source vs parent and keeps the first (upstream) position", () => {
+    const entries = buildForkEntries({
+      name: "pack",
+      current: "https://github.com/me/pack",
+      parent: repo("mid/pack"),
+      source: repo("root/pack"),
+      forks: [repo("mid/pack"), repo("me/pack")],
+    });
+    expect(entries.map((e) => e.repo.full_name)).toEqual(["root/pack", "mid/pack", "me/pack"]);
+    expect(entries.map((e) => e.role)).toEqual(["upstream", "upstream", "current"]);
+  });
+
+  it("returns [] when the backend found nothing (non-GitHub remote, API down)", () => {
+    expect(
+      buildForkEntries({ name: "p", current: null, parent: null, source: null, forks: [] }),
+    ).toEqual([]);
+  });
+});
+
+describe("formatForkMeta", () => {
+  const repo = (over) => ({
+    full_name: "owner/pack",
+    owner: "owner",
+    url: "https://github.com/owner/pack",
+    description: "",
+    stars: 0,
+    pushed_at: null,
+    archived: false,
+    ...over,
+  });
+
+  it("shows owner, compact stars, and the push date (no clock noise)", () => {
+    expect(formatForkMeta(repo({ stars: 1500, pushed_at: "2026-04-01T09:30:00Z" }))).toBe(
+      "owner · ★ 1.5k · pushed 2026-04-01",
+    );
+  });
+
+  it("flags an archived fork so a dead-end switch is visible up front", () => {
+    expect(formatForkMeta(repo({ archived: true }))).toContain("archived");
+  });
+});
+
+describe("formatRemoteSwitchSummary", () => {
+  const result = (over) => ({
+    name: "pack",
+    remote_before: "https://github.com/upstream/pack",
+    remote_after: "https://github.com/fork/pack",
+    ref: "main",
+    before_short: "abc1234",
+    after_short: "def5678",
+    changed_files: 3,
+    deps_changed: false,
+    deps: { attempted: false, ok: null, sources: [], error: null, log: "" },
+    ...over,
+  });
+
+  it("summarises the repo move, ref, sha transition, and file count", () => {
+    expect(formatRemoteSwitchSummary(result({}))).toBe(
+      "upstream/pack → fork/pack · main · abc1234 → def5678 · 3 files changed",
+    );
+  });
+
+  it("collapses to the target repo when the sha and remote did not move", () => {
+    expect(
+      formatRemoteSwitchSummary(
+        result({
+          remote_before: "https://github.com/fork/pack",
+          after_short: "abc1234",
+          changed_files: 0,
+        }),
+      ),
+    ).toBe("fork/pack · main");
   });
 });

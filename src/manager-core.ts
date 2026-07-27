@@ -240,7 +240,7 @@ export function iconForKind(kind: VersionEntry["kind"]): string {
   return kind === "git" ? "git" : "registry";
 }
 
-/** Compact download count, e.g. 1234 -> "1.2k", 2_500_000 -> "2.5M". */
+/** Compact count (downloads, stars…), e.g. 1234 -> "1.2k", 2_500_000 -> "2.5M". */
 export function formatDownloads(n: number | null | undefined): string {
   const v = typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0;
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
@@ -278,6 +278,7 @@ export interface ManagerConfig {
   is_loopback: boolean;
   manager_enabled: boolean;
   reboot_allowed: boolean;
+  delete_allowed: boolean;
 }
 
 /**
@@ -303,6 +304,152 @@ export function installPermitted(config: ManagerConfig | null): boolean {
  */
 export function rebootPermitted(config: ManagerConfig | null): boolean {
   return config ? config.reboot_allowed : false;
+}
+
+/**
+ * Whether the permanent-Delete action should be offered, reflecting the backend
+ * /delete gate (loopback by default, or the TOUCH_MANAGER_ALLOW_REMOTE_DELETE
+ * opt-in, reported as `delete_allowed`). Like reboot — and unlike install — this
+ * defaults to HIDDEN until config loads: an irreversible button the backend
+ * would refuse is worse than a briefly missing one.
+ */
+export function deletePermitted(config: ManagerConfig | null): boolean {
+  return config ? config.delete_allowed : false;
+}
+
+// ============================================================
+// Forks — upstream + sibling repos a pack can be switched to
+// ============================================================
+
+/** One repository in GET /touch_manager/forks (upstream or fork sibling). */
+export interface ForkRepo {
+  full_name: string;
+  owner: string;
+  /** Clone/install URL — always an allowlisted https github.com URL. */
+  url: string;
+  description: string;
+  stars: number;
+  pushed_at: string | null;
+  archived: boolean;
+}
+
+/** GET /touch_manager/forks?name=<pack>. */
+export interface ForksResult {
+  name: string;
+  /** The pack's current origin URL (any forge), or null when it has no remote. */
+  current: string | null;
+  /** The repo this one was forked from, when it is itself a fork. */
+  parent: ForkRepo | null;
+  /** The root of the fork network, when it differs from `parent`. */
+  source: ForkRepo | null;
+  forks: ForkRepo[];
+}
+
+/** POST /touch_manager/remote — the applied fork switch. */
+export interface RemoteSwitchResult {
+  name: string;
+  remote_before: string | null;
+  remote_after: string;
+  ref: string;
+  before_short: string | null;
+  after_short: string | null;
+  changed_files: number;
+  deps_changed: boolean;
+  deps: DepsResult;
+}
+
+/** How a fork-picker row relates to the pack: where it is now, or where it came from. */
+type ForkRole = "current" | "upstream" | "fork";
+
+/** One fork-picker row: a repo plus its role relative to the installed pack. */
+export interface ForkEntry {
+  repo: ForkRepo;
+  role: ForkRole;
+}
+
+/**
+ * Reduce a repository URL to a comparable `host/owner/repo`: lowercased, with
+ * any scheme, `git@host:` SSH form, trailing `.git`, and trailing slashes
+ * removed. Used to tell whether two spellings name the SAME repository —
+ * `git@github.com:Owner/Repo.git` and `https://github.com/owner/repo` do.
+ */
+export function normalizeRepoUrl(raw: string | null | undefined): string {
+  const trimmed = (raw ?? "").trim().toLowerCase();
+  if (!trimmed) return "";
+  const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+)$/.exec(trimmed);
+  const candidate = ssh ? `https://${ssh[1]}/${ssh[2]}` : trimmed;
+  const strip = (s: string): string => s.replace(/\.git$/, "").replace(/\/+$/, "");
+  try {
+    const u = new URL(candidate);
+    return `${u.hostname}${strip(u.pathname)}`;
+  } catch {
+    return strip(candidate);
+  }
+}
+
+/** True when two URLs name the same repository (see normalizeRepoUrl). */
+export function sameRepo(a: string | null | undefined, b: string | null | undefined): boolean {
+  const na = normalizeRepoUrl(a);
+  return na !== "" && na === normalizeRepoUrl(b);
+}
+
+/** Short `owner/repo` label for a repository URL (falls back to the raw URL). */
+export function repoLabel(url: string | null | undefined): string {
+  const norm = normalizeRepoUrl(url);
+  if (!norm) return "";
+  const segments = norm.split("/");
+  return segments.length >= 3 ? segments.slice(1).join("/") : norm;
+}
+
+/**
+ * Order the fork picker: upstream repos first (the usual intent is "go back to
+ * where this was forked from"), then every fork by star count, descending.
+ * Duplicates are collapsed by repository identity — a repo that is both the
+ * source and a listed fork appears once — and whichever entry matches the
+ * pack's current remote is tagged `current` so the UI can mark it and refuse to
+ * "switch" to where it already is.
+ */
+export function buildForkEntries(data: ForksResult): ForkEntry[] {
+  const upstream = [data.source, data.parent].filter((r): r is ForkRepo => !!r);
+  const forks = [...data.forks].sort(
+    (a, b) => b.stars - a.stars || a.full_name.localeCompare(b.full_name),
+  );
+  const seen = new Set<string>();
+  const out: ForkEntry[] = [];
+  for (const [repo, role] of [
+    ...upstream.map((r) => [r, "upstream"] as const),
+    ...forks.map((r) => [r, "fork"] as const),
+  ]) {
+    const key = normalizeRepoUrl(repo.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ repo, role: sameRepo(repo.url, data.current) ? "current" : role });
+  }
+  return out;
+}
+
+/** One-line meta for a fork row: owner · stars · last push · archived. */
+export function formatForkMeta(repo: ForkRepo): string {
+  const parts: string[] = [repo.owner, `★ ${formatDownloads(repo.stars)}`];
+  if (repo.pushed_at) parts.push(`pushed ${repo.pushed_at.slice(0, 10)}`);
+  if (repo.archived) parts.push("archived");
+  return parts.join(" · ");
+}
+
+/** One-line summary of an applied fork switch, for the success toast. */
+export function formatRemoteSwitchSummary(r: RemoteSwitchResult): string {
+  const parts: string[] = [];
+  const before = repoLabel(r.remote_before);
+  const after = repoLabel(r.remote_after);
+  parts.push(before && before !== after ? `${before} → ${after}` : after);
+  if (r.ref) parts.push(r.ref);
+  if (r.before_short && r.after_short && r.before_short !== r.after_short) {
+    parts.push(`${r.before_short} → ${r.after_short}`);
+  }
+  if (r.changed_files > 0) {
+    parts.push(`${r.changed_files} file${r.changed_files === 1 ? "" : "s"} changed`);
+  }
+  return parts.join(" · ");
 }
 
 /** GET /touch_manager/core. */

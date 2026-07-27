@@ -37,18 +37,34 @@ list. Four tabs:
 
 - **Installed** — every pack across all `custom_nodes` roots, with its current
   git ref (or registry version), its author, whether it has local changes, and
-  its remote. Per-pack **Update**, **Versions**, and **Disable** actions (a
-  disabled pack instead offers **Enable**, restoring it) — **Update** works for
-  both git-backed packs (fetch + fast-forward) and packs installed from the
-  Comfy Registry (re-downloads the latest published version). Updating a pack
-  with **local changes** prompts before touching it: cancel, or **Force update**
-  to discard the changes and proceed. Fuzzy search by name, author, or remote
-  URL. The list paints instantly; a background sweep then checks each updatable
-  pack (a few at a time) — a git fetch, or a registry version comparison — and
-  fills its **available update** inline on the row. **Packs with an available
-  update float to the top** once the sweep finishes. Results are cached, so
-  updating one pack doesn't re-check everything; a **Re-check updates** button
-  reruns the sweep on demand.
+  its remote. Per-pack **Update**, **Versions**, **Forks**, **Disable**, and
+  **Delete** actions (a disabled pack instead offers **Enable**, restoring it) —
+  **Update** works for both git-backed packs (fetch + fast-forward) and packs
+  installed from the Comfy Registry (re-downloads the latest published version).
+  Updating a pack with **local changes** prompts before touching it: cancel, or
+  **Force update** to discard the changes and proceed. Fuzzy search by name,
+  author, or remote URL. The list paints instantly; a background sweep then
+  checks each updatable pack (a few at a time) — a git fetch, or a registry
+  version comparison — and fills its **available update** inline on the row.
+  **Packs with an available update float to the top** once the sweep finishes.
+  Results are cached, so updating one pack doesn't re-check everything; a
+  **Re-check updates** button reruns the sweep on demand.
+- **Forks** (from an Installed row) — switch a pack to a **different fork** of
+  the same project without reinstalling it. The picker lists the repo it was
+  forked from (upstream first) and the fork network's siblings by star count,
+  straight from the GitHub API, marks the one you are already on, and always
+  offers a paste-a-URL fallback for a fork it cannot enumerate (or a GitLab
+  one). Switching repoints the pack's `origin` and checks out the new remote's
+  default branch (or a ref you name) **in place**: the directory name and git
+  history are kept, so the pack keeps working and later Updates track the fork.
+  New Python dependencies are installed automatically. A dirty working tree
+  prompts before anything is discarded.
+- **Delete** (from an Installed row) — permanently remove a pack directory, the
+  irreversible counterpart to **Disable**. It is offered only when the server's
+  delete gate permits it (loopback by default; a non-loopback bind requires
+  `TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1`), and it asks for an explicit
+  confirmation that names the directory and points at Disable as the reversible
+  alternative.
 - **Install URL** — paste a GitHub/GitLab URL to clone a pack into
   `custom_nodes`. Gated by the server's bind policy (loopback by default; a
   non-loopback bind requires the `TOUCH_MANAGER_ALLOW_REMOTE_INSTALL` server

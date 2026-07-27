@@ -26,15 +26,21 @@ import {
 } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
 import {
+  buildForkEntries,
   type CoreInfo,
   type CoreUpdateResult,
   type DepsResult,
+  deletePermitted,
+  type ForkEntry,
+  type ForksResult,
   filterPacks,
   formatCoreBehind,
   formatDepsResult,
+  formatForkMeta,
   formatReconnectStatus,
   formatRef,
   formatRegistryMeta,
+  formatRemoteSwitchSummary,
   formatUpdateStatus,
   formatUpdateSummary,
   hoistPacksWithUpdates,
@@ -50,8 +56,10 @@ import {
   type RegistryNode,
   type RegistrySearchResult,
   type RegistryVersion,
+  type RemoteSwitchResult,
   rebootPermitted,
   reconnectExpired,
+  repoLabel,
   type UpdateCheckResult,
   type UpdateResult,
   type UpdatesListEntry,
@@ -175,6 +183,9 @@ const CSS = `
   border: 1px solid var(--border-color, #444); opacity: 0.85; }
 .tm-badge-git { background: rgba(40,90,160,0.25); }
 .tm-badge-registry { background: rgba(120,60,160,0.25); }
+.tm-badge-upstream { background: rgba(40,140,90,0.25); }
+.tm-badge-fork { background: rgba(90,90,110,0.25); }
+.tm-badge-current { background: rgba(200,150,20,0.25); }
 .tm-row-head { display: flex; align-items: center; flex-wrap: wrap; }
 .tm-installed-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 2px; }
 .tm-installed-head .tm-sweep-label { margin-left: auto; }
@@ -523,11 +534,23 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
     if (!pack.is_git) versionsBtn.title = "not a git repo";
     actions.appendChild(versionsBtn);
 
+    // Switching to a fork repoints the pack's git remote — git packs only (a
+    // registry pack has no remote to repoint; reinstall it from the Registry tab).
+    const forksBtn = button("Forks", "", () => void openForks(state, pack));
+    forksBtn.disabled = !pack.is_git;
+    if (!pack.is_git) forksBtn.title = "not a git repo";
+    actions.appendChild(forksBtn);
+
     actions.appendChild(button("Disable", "tm-btn-danger", () => void doDisable(state, pack.name)));
   } else {
     // A disabled pack can't be updated (its dir is renamed aside, so the backend
-    // won't resolve it) — the only action is to re-enable it.
+    // won't resolve it) — it can only be re-enabled or deleted for good.
     actions.appendChild(button("Enable", "tm-btn-primary", () => void doEnable(state, pack.name)));
+  }
+  // Permanent removal, offered for enabled and disabled packs alike, and only
+  // when the backend's delete gate would accept it (see deletePermitted).
+  if (deletePermitted(state.config)) {
+    actions.appendChild(button("Delete", "tm-btn-danger", () => void doDelete(state, pack)));
   }
 
   row.appendChild(actions);
@@ -755,6 +778,47 @@ async function doEnable(state: ManagerState, name: string): Promise<void> {
   }
 }
 
+/**
+ * Permanently delete a pack's directory. The confirmation spells out what is
+ * lost (the directory, any local edits) and points at Disable as the reversible
+ * alternative — this is the only action in the manager that cannot be undone.
+ */
+async function doDelete(state: ManagerState, pack: InstalledPack): Promise<void> {
+  const ok = await confirmInShell(state.shell, {
+    title: "Delete pack permanently?",
+    message:
+      `Permanently delete "${pack.name}" and everything in it, including any local ` +
+      `changes? This CANNOT be undone.\n\n${pack.path}\n\n` +
+      (pack.enabled
+        ? "To remove it reversibly instead, cancel and use Disable. "
+        : "This pack is already disabled — deleting frees its disk space. ") +
+      "A restart is required.",
+    confirmLabel: "Delete permanently",
+    danger: true,
+    // No Enter shortcut: an irreversible action should take a deliberate tap.
+    enterConfirms: false,
+  });
+  if (!ok) return;
+  state.shell.setBusy(true);
+  try {
+    await apiPost("delete", { name: pack.name });
+    markRestartPending(state);
+    // The pack set changed — the cached updates sweep is now stale.
+    state.sweep = null;
+    toast("success", `Deleted ${pack.name}`, "Restart ComfyUI to apply.");
+    await renderInstalledTab(state);
+  } catch (e) {
+    const err = e as ManagerError;
+    toast(
+      "error",
+      `Delete failed: ${pack.name}`,
+      `${err.message}${err.code ? ` (${err.code})` : ""}`,
+    );
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+
 // ============================================================
 // Versions picker (opened from an Installed row)
 // ============================================================
@@ -829,6 +893,297 @@ async function openVersions(state: ManagerState, pack: InstalledPack): Promise<v
       list.appendChild(r);
     }
     section.appendChild(list);
+  }
+}
+
+// ============================================================
+// Fork picker (opened from an Installed row)
+//
+// "Switch to a different fork" keeps the pack's DIRECTORY (its name is part of
+// the /extensions/<pack>/ URL and of ComfyUI's module identity) and its git
+// history, and only repoints origin. The list comes from the GitHub API via the
+// backend — upstream first, then siblings by stars — and there is always a
+// paste-a-URL fallback for a fork the API cannot enumerate (or a non-GitHub one).
+// ============================================================
+
+/** Show the fork filter input only once the list is long enough to need it. */
+const FORK_FILTER_THRESHOLD = 6;
+
+async function openForks(state: ManagerState, pack: InstalledPack): Promise<void> {
+  const heading = (): HTMLElement[] => [
+    button("← Back to installed", "", () => void renderInstalledTab(state)),
+    el("div", "tm-row-title", `Forks — ${pack.name}`),
+  ];
+  const section = resetBody(state);
+  section.append(...heading(), emptyState("Loading forks…"));
+  state.shell.setBusy(true);
+
+  let data: ForksResult;
+  try {
+    data = await apiGet<ForksResult>(`forks?name=${encodeURIComponent(pack.name)}`);
+  } catch (e) {
+    section.replaceChildren(...heading(), emptyState(`Failed: ${(e as Error).message}`));
+    state.shell.setBusy(false);
+    return;
+  }
+  state.shell.setBusy(false);
+
+  // Switching lands code from another repository, so it rides the backend's
+  // install bind gate — reflect that here rather than letting it fail on POST.
+  const allowed = installPermitted(state.config);
+  section.replaceChildren(...heading());
+  section.appendChild(
+    el(
+      "div",
+      allowed ? "tm-note tm-note-info" : "tm-note tm-note-warn",
+      allowed
+        ? `Switching repoints "${pack.name}" at another repository. Its directory name and ` +
+            "git history are kept — only the code it tracks changes. Python dependencies are " +
+            "installed automatically; a restart is required. Only switch to code you trust."
+        : "ComfyUI is bound to a non-loopback address, so the server refuses to switch a " +
+            "pack's repository (set TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1 to allow).",
+    ),
+  );
+
+  section.appendChild(el("div", "tm-field-label", "Current remote"));
+  section.appendChild(el("div", "tm-row-meta", data.current ?? "no remote configured"));
+
+  const entries = buildForkEntries(data);
+  if (entries.length === 0) {
+    section.appendChild(
+      emptyState(
+        "No forks found — this pack is not on GitHub, has no forks, or the GitHub API is " +
+          "unavailable. You can still enter a repository URL below.",
+      ),
+    );
+  } else {
+    section.appendChild(el("div", "tm-field-label", "Upstream & forks"));
+    const listHost = el("div", "tm-section");
+    const paint = (query: string): void => {
+      listHost.replaceChildren(forkList(state, pack, entries, query, allowed));
+    };
+    if (entries.length >= FORK_FILTER_THRESHOLD) {
+      const filter = el("input", "tm-input");
+      filter.type = "search";
+      filter.placeholder = "Filter forks…";
+      filter.autocomplete = "off";
+      filter.spellcheck = false;
+      filter.addEventListener("input", () => paint(filter.value));
+      section.appendChild(filter);
+    }
+    section.appendChild(listHost);
+    paint("");
+  }
+
+  section.appendChild(el("div", "tm-field-label", "Other repository URL"));
+  const urlInput = el("input", "tm-input");
+  urlInput.type = "url";
+  urlInput.placeholder = "https://github.com/owner/repo";
+  urlInput.autocomplete = "off";
+  urlInput.spellcheck = false;
+  section.appendChild(urlInput);
+
+  const refInput = el("input", "tm-input");
+  refInput.type = "text";
+  refInput.placeholder = "ref (optional branch / tag)";
+  refInput.autocomplete = "off";
+  refInput.spellcheck = false;
+  section.appendChild(refInput);
+
+  const hint = el("div", "tm-row-meta", "");
+  section.appendChild(hint);
+  const switchBtn = button(
+    "Switch to this repository",
+    "tm-btn-primary",
+    () => void doSwitchRemote(state, pack, urlInput.value.trim(), refInput.value.trim()),
+  );
+  section.appendChild(switchBtn);
+
+  const refresh = (): void => {
+    if (!allowed) {
+      switchBtn.disabled = true;
+      hint.textContent = "Switching is disabled by the server bind policy.";
+      return;
+    }
+    const v = validateInstallUrl(urlInput.value);
+    switchBtn.disabled = !v.ok;
+    hint.textContent = v.ok
+      ? `Will track ${repoLabel(urlInput.value)}.`
+      : urlInput.value.trim()
+        ? urlValidationHint(v.reason)
+        : "";
+  };
+  urlInput.addEventListener("input", refresh);
+  refresh();
+}
+
+/**
+ * The fork rows, fuzzy-filtered by `query`. An empty query preserves
+ * buildForkEntries' deliberate order (upstream first, then stars) instead of
+ * re-sorting by name, so the default view leads with the useful rows.
+ */
+function forkList(
+  state: ManagerState,
+  pack: InstalledPack,
+  entries: readonly ForkEntry[],
+  query: string,
+  allowed: boolean,
+): HTMLElement {
+  const rows = entries.map((entry) => ({
+    name: entry.repo.full_name,
+    remote_url: entry.repo.url,
+    author: entry.repo.owner,
+    entry,
+  }));
+  const ranked = query.trim()
+    ? filterPacks(query, rows)
+    : rows.map((row) => ({ pack: row, primaryMatches: [] as number[] }));
+
+  const list = el("div", "tm-list");
+  if (ranked.length === 0) {
+    list.appendChild(emptyState("No matching forks."));
+    return list;
+  }
+  for (const { pack: row, primaryMatches } of ranked) {
+    list.appendChild(forkRow(state, pack, row.entry, primaryMatches, allowed));
+  }
+  return list;
+}
+
+function forkRow(
+  state: ManagerState,
+  pack: InstalledPack,
+  entry: ForkEntry,
+  matches: number[],
+  allowed: boolean,
+): HTMLElement {
+  const row = el("div", "tm-row");
+  const head = el("div", "tm-row-head");
+  head.appendChild(el("span", `tm-badge tm-badge-${entry.role}`, entry.role));
+  const title = el("span", "tm-row-title");
+  title.appendChild(highlightMatches(entry.repo.full_name, matches));
+  head.appendChild(title);
+  row.appendChild(head);
+  row.appendChild(el("div", "tm-row-meta", formatForkMeta(entry.repo)));
+  if (entry.repo.description) row.appendChild(el("div", "tm-row-meta", entry.repo.description));
+
+  const actions = el("div", "tm-row-actions");
+  if (entry.role === "current") {
+    actions.appendChild(el("div", "tm-row-meta", "Already tracking this repository."));
+  } else {
+    const switchBtn = button(
+      "Switch",
+      "tm-btn-primary",
+      () => void doSwitchRemote(state, pack, entry.repo.url),
+    );
+    switchBtn.disabled = !allowed;
+    if (!allowed) switchBtn.title = "disabled by the server bind policy";
+    actions.appendChild(switchBtn);
+  }
+  row.appendChild(actions);
+  return row;
+}
+
+/** Confirm a fork switch that will discard the pack's local changes. */
+function confirmForceSwitch(
+  state: ManagerState,
+  name: string,
+  fromDirty: boolean,
+): Promise<boolean> {
+  return confirmInShell(state.shell, {
+    title: fromDirty ? "Pack has local changes" : "Switch blocked by local changes",
+    message: fromDirty
+      ? `"${name}" has uncommitted local changes. Switching repositories will DISCARD them ` +
+        "(untracked files are kept). Continue?"
+      : `Switching "${name}" was refused — the working tree has local changes. ` +
+        "Discard them (untracked files are kept) and switch anyway?",
+    confirmLabel: "Discard and switch",
+    danger: true,
+    enterConfirms: true,
+  });
+}
+
+/**
+ * One switch attempt. Returns the backend error `code` on failure — notably
+ * `"dirty"`, which the caller clears with a forced retry — or null on success.
+ * A non-forced `dirty` refusal is returned WITHOUT a toast (the caller offers
+ * the Force choice instead); every other failure toasts here.
+ */
+async function attemptRemoteSwitch(
+  state: ManagerState,
+  pack: InstalledPack,
+  url: string,
+  ref: string,
+  force: boolean,
+): Promise<string | null> {
+  state.shell.setBusy(true);
+  try {
+    const body: Record<string, unknown> = { name: pack.name, url };
+    if (ref) body.ref = ref;
+    if (force) body.force = true;
+    const result = await apiPost<RemoteSwitchResult>("remote", body);
+    markRestartPending(state);
+    // The pack tracks a different repo now: every cached update check for it is
+    // meaningless, so drop the whole sweep and let the list re-check.
+    state.sweep = null;
+    const deps = formatDepsResult(result.deps);
+    toast(
+      deps?.level === "warn" ? "warn" : "success",
+      `Switched ${pack.name}`,
+      deps
+        ? `${formatRemoteSwitchSummary(result)} — ${deps.text}`
+        : formatRemoteSwitchSummary(result),
+    );
+    await renderInstalledTab(state);
+    return null;
+  } catch (e) {
+    const err = e as ManagerError;
+    if (err.code === "dirty" && !force) return "dirty";
+    toast(
+      "error",
+      `Switch failed: ${pack.name}`,
+      `${err.message}${err.code ? ` (${err.code})` : ""}`,
+    );
+    return err.code ?? "error";
+  } finally {
+    state.shell.setBusy(false);
+  }
+}
+
+/**
+ * Switch a pack to another repository: confirm the switch itself, then handle a
+ * dirty working tree the same way an update does — prompt before the attempt
+ * when we already know it is dirty, or offer a forced retry when the backend
+ * refuses with `dirty`.
+ */
+async function doSwitchRemote(
+  state: ManagerState,
+  pack: InstalledPack,
+  url: string,
+  ref = "",
+): Promise<void> {
+  const target = repoLabel(url) || url;
+  const ok = await confirmInShell(state.shell, {
+    title: "Switch to a different fork?",
+    message:
+      `Point "${pack.name}" at ${target}${ref ? ` @ ${ref}` : ""}? Its directory name and git ` +
+      "history are kept; the code it tracks is replaced. Only switch to code you trust. " +
+      "A restart is required.",
+    confirmLabel: "Switch",
+    danger: true,
+    enterConfirms: true,
+  });
+  if (!ok) return;
+
+  let force = false;
+  if (pack.dirty) {
+    if (!(await confirmForceSwitch(state, pack.name, true))) return; // user cancelled
+    force = true;
+  }
+
+  const code = await attemptRemoteSwitch(state, pack, url, ref, force);
+  if (code === "dirty" && !force && (await confirmForceSwitch(state, pack.name, false))) {
+    await attemptRemoteSwitch(state, pack, url, ref, true);
   }
 }
 

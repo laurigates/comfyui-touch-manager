@@ -20,18 +20,24 @@ are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
   GET  /touch_manager/installed   — every pack dir across all custom_nodes roots
   GET  /touch_manager/updates     — per-pack behind/ahead vs upstream (fetches)
   GET  /touch_manager/versions    — branches/tags/releases for one pack
+  GET  /touch_manager/forks       — a pack's upstream + fork siblings (GitHub)
   POST /touch_manager/install     — clone a github/gitlab URL into roots[0]
   POST /touch_manager/update      — fetch + checkout/ff one pack, install deps
                                     (``force`` discards local changes on a dirty tree)
+  POST /touch_manager/remote      — repoint one pack at a different fork and
+                                    check it out (``force`` on a dirty tree)
   POST /touch_manager/uninstall   — reversible disable (rename to .disabled)
   POST /touch_manager/enable      — re-enable a disabled pack (drop .disabled)
+  POST /touch_manager/delete      — IRREVERSIBLE removal of a pack directory
   GET  /touch_manager/core        — core repo ref/behind/dirty/remotes
   POST /touch_manager/core/update — git pull core; install deps on drift
   POST /touch_manager/reboot      — opt-in os.execv stub (disabled by default)
 
 Security perimeter (enforced here, surfaced in the frontend via /config):
-  - Bind gate: /install is refused on a NON-loopback bind unless the operator
-    sets TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1.
+  - Bind gate: /install and /remote are refused on a NON-loopback bind unless
+    the operator sets TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1 — both land code
+    from an arbitrary allowlisted repository. /delete is gated separately
+    (loopback, or TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1) since it destroys data.
   - URL allowlist: https github.com / gitlab.com only; the derived directory
     name is sanitised to [A-Za-z0-9._-] and path-traversal-guarded against the
     install root.
@@ -107,6 +113,14 @@ ARCHIVE_ALLOWED_HOSTS = {
 # Hard ceiling on a downloaded archive, so a hostile/garbage URL cannot exhaust
 # disk. 250 MB comfortably covers real node packs.
 MAX_ARCHIVE_BYTES = 250 * 1024 * 1024
+
+# GitHub REST API — releases (version picker) and forks (fork picker). Read-only
+# and unauthenticated: everything sourced from it is best-effort.
+GITHUB_API = "https://api.github.com"
+
+# Cap the fork listing. Popular packs have hundreds of forks, nearly all stale;
+# the API sorts by stars so the first page is the part worth showing on a phone.
+_FORKS_PER_PAGE = 30
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +309,32 @@ def _reboot_allowed() -> bool:
     bind additionally requires TOUCH_MANAGER_ALLOW_REMOTE_REBOOT=1.
     """
     return _is_loopback(_get_listen()) or _remote_reboot_allowed()
+
+
+def _remote_delete_allowed() -> bool:
+    """True when the operator has opted into delete on a non-loopback bind."""
+    return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_DELETE") == "1"
+
+
+def _delete_allowed() -> bool:
+    """Permanent delete is allowed on a loopback bind, or with the remote opt-in.
+
+    Deletion is the one IRREVERSIBLE operation here — ``uninstall`` merely
+    renames a pack aside, but ``delete`` unlinks it. It therefore gets its own
+    gate (shaped like the reboot one) rather than riding on the install gate: an
+    operator who exposed the manager to their LAN to install packs has not
+    thereby consented to anyone on it wiping their custom_nodes tree.
+    """
+    return _is_loopback(_get_listen()) or _remote_delete_allowed()
+
+
+def _install_allowed() -> bool:
+    """True when this bind may land new code (clone / fork switch).
+
+    Loopback is trusted by default; a non-loopback bind requires
+    TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1.
+    """
+    return _is_loopback(_get_listen()) or _remote_install_allowed()
 
 
 def _sanitize_name(raw: str) -> str | None:
@@ -493,13 +533,16 @@ def _github_owner_repo(remote: str | None) -> tuple[str, str] | None:
     return None
 
 
-def _github_releases(remote: str | None) -> list[dict[str, Any]]:
-    """Fetch GitHub releases for ``remote``; [] on non-github or any failure."""
-    owner_repo = _github_owner_repo(remote)
-    if not owner_repo:
-        return []
-    owner, repo = owner_repo
-    url = f"https://api.github.com/repos/{owner}/{repo}/releases"
+def _github_get(path: str, params: dict[str, Any] | None = None) -> Any | None:
+    """GET an api.github.com endpoint and decode JSON; None on any failure.
+
+    Unauthenticated and best-effort (same shape as ``_registry_get``): a rate
+    limit, a private repo, or no network degrades to None so the caller can fall
+    back rather than fail the whole request.
+    """
+    url = GITHUB_API + path
+    if params:
+        url += "?" + urlencode(params)
     req = urllib.request.Request(
         url,
         headers={
@@ -509,10 +552,19 @@ def _github_releases(remote: str | None) -> list[dict[str, Any]]:
     )
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            data = loads(resp.read().decode("utf-8"))
+            return loads(resp.read().decode("utf-8"))
     except Exception as exc:
-        log.debug("github releases fetch failed for %s: %s", remote, exc)
+        log.debug("github GET failed for %s: %s", url, exc)
+        return None
+
+
+def _github_releases(remote: str | None) -> list[dict[str, Any]]:
+    """Fetch GitHub releases for ``remote``; [] on non-github or any failure."""
+    owner_repo = _github_owner_repo(remote)
+    if not owner_repo:
         return []
+    owner, repo = owner_repo
+    data = _github_get(f"/repos/{owner}/{repo}/releases")
     if not isinstance(data, list):
         return []
     releases: list[dict[str, Any]] = []
@@ -528,6 +580,80 @@ def _github_releases(remote: str | None) -> list[dict[str, Any]]:
             }
         )
     return releases
+
+
+def _normalize_github_repo(raw: Any) -> dict[str, Any] | None:
+    """Trim a GitHub repo object to the fields the fork picker renders.
+
+    Returns None when the entry is unusable — notably when its derived
+    ``https://github.com/<owner>/<repo>`` URL would NOT pass the install
+    allowlist, so the picker can never offer a repo the switch route would then
+    refuse.
+    """
+    if not isinstance(raw, dict):
+        return None
+    full_name = raw.get("full_name")
+    if not isinstance(full_name, str) or full_name.count("/") != 1:
+        return None
+    # Both halves must survive the same name guard the install path applies —
+    # _validate_url only sanitises the repo tail, and an owner it would let
+    # through unchecked has no business being built into a clone URL.
+    if any(_sanitize_name(seg) is None for seg in full_name.split("/")):
+        return None
+    url = f"https://github.com/{full_name}"
+    if _validate_url(url)[1]:
+        return None
+    owner = raw.get("owner")
+    login = owner.get("login") if isinstance(owner, dict) else None
+    return {
+        "full_name": full_name,
+        "owner": login or full_name.split("/", 1)[0],
+        "url": url,
+        "description": raw.get("description") or "",
+        "stars": raw.get("stargazers_count") or 0,
+        "pushed_at": raw.get("pushed_at"),
+        "archived": bool(raw.get("archived")),
+    }
+
+
+def _collect_forks(remote: str | None) -> dict[str, Any]:
+    """Upstream + fork siblings of the repo ``remote`` points at.
+
+    ``parent`` is the repo this one was forked from and ``source`` the ultimate
+    root of the fork network (both None when ``remote`` is not itself a fork);
+    ``forks`` lists the fork network's members. Siblings are listed from the
+    ROOT repo, not from ``remote`` — a fork's own /forks is nearly always empty,
+    while the root's is the list a user actually wants to switch between.
+
+    Everything is best-effort: a non-GitHub remote (gitlab, ssh, none) or any
+    API failure yields empty fields, and the frontend falls back to its
+    paste-a-URL entry.
+    """
+    empty: dict[str, Any] = {"parent": None, "source": None, "forks": []}
+    owner_repo = _github_owner_repo(remote)
+    if not owner_repo:
+        return empty
+    owner, repo = owner_repo
+
+    info = _github_get(f"/repos/{owner}/{repo}")
+    parent = _normalize_github_repo(info.get("parent")) if isinstance(info, dict) else None
+    source = _normalize_github_repo(info.get("source")) if isinstance(info, dict) else None
+    if source and parent and source["full_name"] == parent["full_name"]:
+        source = None  # a one-level fork: parent IS the source, don't list it twice
+
+    root = source or parent
+    list_owner, list_repo = root["full_name"].split("/", 1) if root else (owner, repo)
+    data = _github_get(
+        f"/repos/{list_owner}/{list_repo}/forks",
+        {"sort": "stargazers", "per_page": _FORKS_PER_PAGE},
+    )
+    forks: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        for entry in data:
+            norm = _normalize_github_repo(entry)
+            if norm:
+                forks.append(norm)
+    return {"parent": parent, "source": source, "forks": forks}
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1245,105 @@ def _do_pack_update(
     return result, "", ""
 
 
+def _remote_default_branch(cwd: str, remote: str = "origin") -> str | None:
+    """The default branch of ``remote``, or None when it cannot be resolved.
+
+    Asks the remote to (re)point ``refs/remotes/<remote>/HEAD`` at its current
+    default branch and reads it back — so switching from a fork whose default is
+    ``master`` to one whose default is ``main`` lands on the right branch
+    instead of the previous repo's name.
+    """
+    _git(["remote", "set-head", remote, "-a"], cwd, timeout=30)
+    rc, out, _ = _git(["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"], cwd)
+    prefix = f"{remote}/"
+    if rc == 0 and out.strip().startswith(prefix):
+        return out.strip()[len(prefix) :] or None
+    return None
+
+
+def _do_remote_switch(
+    full: str, url: str, safe_ref: str | None, force: bool = False
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Repoint a pack's ``origin`` at ``url`` and check the new repo out.
+
+    This is the "switch to a different fork" operation: the pack DIRECTORY name
+    is deliberately unchanged (it is part of the served
+    ``/extensions/<pack>/`` URL and of ComfyUI's module identity), only the code
+    inside it moves to another repository. Git history is kept, so a switch
+    between related forks is an ordinary fetch + checkout rather than a
+    re-clone, and switching back is symmetric.
+
+    Returns (result, "", "") on success or (None, error, code) on failure. Every
+    failure path RESTORES the previous remote URL, so a bad URL, an unreachable
+    fork, or a checkout that will not apply leaves the pack exactly as it was
+    (the only residue is fetched objects, which git will garbage-collect).
+
+    ``safe_ref`` (already argument-injection-checked) picks an explicit branch or
+    tag on the new remote; None takes the new remote's default branch. ``force``
+    discards local changes to tracked files, mirroring ``_do_pack_update``.
+    """
+    old_url = _remote_url(full)
+    rc, before_out, _ = _git(["rev-parse", "HEAD"], full)
+    before = before_out.strip() if rc == 0 else ""
+
+    args = ["remote", "set-url", "origin", url] if old_url else ["remote", "add", "origin", url]
+    rc, _, err = _git(args, full)
+    if rc != 0:
+        return None, err.strip() or "could not set the remote", "remote_failed"
+
+    def _restore() -> None:
+        if old_url:
+            _git(["remote", "set-url", "origin", old_url], full)
+        else:
+            _git(["remote", "remove", "origin"], full)
+
+    rc, _, err = _git(["fetch", "--tags", "origin"], full, timeout=180)
+    if rc != 0:
+        _restore()
+        return None, err.strip() or "fetch failed", "fetch_failed"
+
+    target = safe_ref or _remote_default_branch(full)
+    if not target:
+        _restore()
+        return None, "could not resolve a branch on the new remote", "checkout_failed"
+
+    # A branch on the new remote gets a local branch reset onto it (so the pack
+    # tracks the fork and later plain Updates fast-forward correctly); anything
+    # else (a tag, a sha) is checked out detached, exactly like the version picker.
+    rc, _, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{target}"], full)
+    if rc == 0:
+        checkout = ["checkout", "-B", target, f"origin/{target}"]
+        if force:
+            checkout.insert(1, "--force")
+    else:
+        checkout = ["checkout", "-f", target] if force else ["checkout", target]
+    rc, _, err = _git(checkout, full, timeout=60)
+    if rc != 0:
+        _restore()
+        return None, err.strip() or "checkout failed", "checkout_failed"
+
+    rc, after_out, _ = _git(["rev-parse", "HEAD"], full)
+    after = after_out.strip() if rc == 0 else ""
+
+    result: dict[str, Any] = {
+        "remote_before": old_url,
+        "remote_after": url,
+        "ref": target,
+        "before_short": before[:7] or None,
+        "after_short": after[:7] or None,
+        "changed_files": 0,
+        "deps_changed": False,
+    }
+    # Both shas come from git, never from the caller — safe to pass as args.
+    if before and after and before != after:
+        rc, names, _ = _git(["diff", "--name-only", before, after], full)
+        if rc == 0:
+            files = [line for line in names.splitlines() if line.strip()]
+            result["changed_files"] = len(files)
+            result["deps_changed"] = any(os.path.basename(f) in _DEPS_FILES for f in files)
+    return result, "", ""
+
+
 def _do_registry_update(
     node_id: str, version: str | None, target: str
 ) -> tuple[dict[str, Any] | None, str, str]:
@@ -1256,6 +1481,7 @@ async def config(request: web.Request) -> web.Response:
             "is_loopback": _is_loopback(listen),
             "manager_enabled": True,
             "reboot_allowed": _reboot_allowed(),
+            "delete_allowed": _delete_allowed(),
         }
     )
 
@@ -1319,6 +1545,25 @@ async def versions(request: web.Request) -> web.Response:
     )
 
 
+@PromptServer.instance.routes.get("/touch_manager/forks")
+async def forks(request: web.Request) -> web.Response:
+    """List one pack's upstream repo and the forks it could switch to.
+
+    GitHub-only and best-effort: a pack on another forge (or an unreachable
+    API) returns empty lists alongside its current remote, and the frontend
+    falls back to entering a repository URL by hand.
+    """
+    safe = _sanitize_name(request.rel_url.query.get("name", ""))
+    if not safe:
+        return _err("missing or invalid name", "not_found", 400)
+    full = _find_pack(safe, include_disabled=True)
+    if not full or not _is_git(full):
+        return _err("not found", "not_found", 404)
+    remote = await _run(_remote_url, full)
+    data = await _run(_collect_forks, remote)
+    return web.json_response({"ok": True, "name": safe, "current": remote, **data})
+
+
 @PromptServer.instance.routes.get("/touch_manager/registry/search")
 async def registry_search(request: web.Request) -> web.Response:
     """Search the Comfy Registry (server-side proxy; normalised subset)."""
@@ -1372,7 +1617,7 @@ async def registry_install(request: web.Request) -> web.Response:
     """Download + safely extract a registry node version into custom_nodes."""
     body = await _body(request)
     # Same bind gate as git install — this fetches and writes node code too.
-    if not _is_loopback(_get_listen()) and not _remote_install_allowed():
+    if not _install_allowed():
         return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
 
     node_id = _sanitize_name(str(body.get("id", "")))
@@ -1426,7 +1671,7 @@ async def install(request: web.Request) -> web.Response:
     body = await _body(request)
     # Bind gate FIRST — never reach validation/clone on a non-loopback bind
     # unless the operator explicitly opted in.
-    if not _is_loopback(_get_listen()) and not _remote_install_allowed():
+    if not _install_allowed():
         return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
 
     name, code = _validate_url(body.get("url"))
@@ -1512,6 +1757,52 @@ async def update(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
 
 
+@PromptServer.instance.routes.post("/touch_manager/remote")
+async def remote(request: web.Request) -> web.Response:
+    """Switch one git pack to a different fork, in place.
+
+    Same bind gate as /install: this lands code from an arbitrary allowlisted
+    repository, so it is refused on a non-loopback bind without the operator's
+    opt-in. A dirty working tree is refused with 409 ``dirty`` unless ``force``
+    is set (which discards local changes to tracked files).
+    """
+    body = await _body(request)
+    if not _install_allowed():
+        return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
+
+    name = _sanitize_name(str(body.get("name", "")))
+    if not name:
+        return _err("not found", "not_found", 404)
+    full = _find_pack(name)
+    if not full:
+        return _err("not found", "not_found", 404)
+    if not await _run(_is_git, full):
+        return _err("not a git repository", "not_git", 400)
+
+    url = body.get("url")
+    if _validate_url(url)[1]:
+        return _err("invalid repository url", "invalid_url", 400)
+
+    # Validate the ref BEFORE touching the remote so a malicious ref never
+    # reaches git (argument-injection guard — see _safe_ref).
+    ref = body.get("ref")
+    safe_ref = _safe_ref(ref) if ref else None
+    if ref and safe_ref is None:
+        return _err("invalid ref", "checkout_failed", 400)
+
+    force = bool(body.get("force"))
+    if not force and await _run(_is_dirty, full):
+        return _err("pack has local changes", "dirty", 409)
+
+    result, err, code = await _run(_do_remote_switch, full, url, safe_ref, force)
+    if result is None:
+        return _err(err, code, 500)
+    # Switching forks can land an entirely different dependency set — install it
+    # whenever a dependency file differs between the two checkouts.
+    result["deps"] = await _run(_install_deps, full) if result["deps_changed"] else _no_deps()
+    return web.json_response({"ok": True, "name": name, "restart_required": True, **result})
+
+
 @PromptServer.instance.routes.post("/touch_manager/uninstall")
 async def uninstall(request: web.Request) -> web.Response:
     """Disable a pack reversibly by renaming its dir to ``<name>.disabled``."""
@@ -1561,6 +1852,40 @@ async def enable(request: web.Request) -> web.Response:
         return _err(str(exc), "rename_failed", 500)
 
     return web.json_response({"ok": True, "name": name, "restart_required": True})
+
+
+@PromptServer.instance.routes.post("/touch_manager/delete")
+async def delete(request: web.Request) -> web.Response:
+    """Permanently remove a pack directory — the irreversible sibling of uninstall.
+
+    ``uninstall`` renames a pack to ``<name>.disabled`` and can be undone from
+    the UI; this unlinks the directory and everything in it, including any local
+    edits. Gated on loopback (or TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1), and
+    refuses any pack path that does not resolve inside its own custom_nodes root
+    — so a symlinked pack dir deletes nothing outside the tree.
+    """
+    if not _delete_allowed():
+        return _err("delete disabled on non-loopback bind", "delete_disabled", 403)
+    body = await _body(request)
+    name = _sanitize_name(str(body.get("name", "")))
+    if not name:
+        return _err("not found", "not_found", 404)
+    # Disabled packs are deletable too — a pack disabled and then deleted is the
+    # ordinary "try it, then get rid of it" path.
+    full = _find_pack(name, include_disabled=True)
+    if not full:
+        return _err("not found", "not_found", 404)
+
+    root = os.path.dirname(full)
+    if os.path.islink(full) or not _within_root(full, root):
+        return _err("pack path escapes its custom_nodes root", "invalid_target", 400)
+
+    try:
+        await _run(shutil.rmtree, full)
+    except OSError as exc:
+        return _err(str(exc) or "delete failed", "delete_failed", 500)
+
+    return web.json_response({"ok": True, "name": name, "path": full, "restart_required": True})
 
 
 @PromptServer.instance.routes.get("/touch_manager/core")

@@ -50,9 +50,9 @@ def _git(cwd, *args, check=True):
     )
 
 
-def _init_bare(path):
+def _init_bare(path, branch="main"):
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "--bare", "-b", "main")
+    _git(path, "init", "--bare", "-b", branch)
 
 
 def _init_seed(path, origin):
@@ -235,6 +235,7 @@ def test_config_loopback_default(monkeypatch):
     monkeypatch.setattr(comfy.cli_args.args, "listen", "")
     monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", raising=False)
     monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", raising=False)
     resp = _get(pack.config)
     assert resp.status == 200
     body = resp.json_body
@@ -242,19 +243,23 @@ def test_config_loopback_default(monkeypatch):
     assert body["is_loopback"] is True
     assert body["allow_remote_install"] is False
     assert body["manager_enabled"] is True
-    # Reboot is allowed on a loopback bind by default.
+    # Reboot and delete are both allowed on a loopback bind by default.
     assert body["reboot_allowed"] is True
+    assert body["delete_allowed"] is True
 
 
 def test_config_non_loopback_with_override(monkeypatch):
     monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
     monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", "1")
     monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", raising=False)
     body = _get(pack.config).json_body
     assert body["is_loopback"] is False
     assert body["allow_remote_install"] is True
-    # Reboot stays off on a non-loopback bind without its own opt-in.
+    # Reboot and delete stay off on a non-loopback bind without their own
+    # opt-ins — the install override does not carry over to either.
     assert body["reboot_allowed"] is False
+    assert body["delete_allowed"] is False
 
 
 # ===========================================================================
@@ -508,6 +513,157 @@ def test_versions_ls_remote_for_remote_pack(tmp_path):
     assert set(body["branches"]) == {"main", "feature"}
     assert body["tags"] == ["v2.0.0"]
     assert body["releases"] == []  # local-path origin -> non-github -> []
+
+
+# ===========================================================================
+# GET /touch_manager/forks — upstream + sibling discovery (GitHub API mocked)
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        "not a dict",
+        {"full_name": None},
+        {"full_name": "no-slash"},
+        {"full_name": "too/many/slashes"},
+        {"full_name": "bad owner/pack"},  # would not survive the install URL gate
+    ],
+)
+def test_normalize_github_repo_rejects_unusable(raw):
+    # The picker must never offer a repo the /remote route would then refuse.
+    assert pack._normalize_github_repo(raw) is None
+
+
+def test_normalize_github_repo_keeps_the_fields_the_picker_renders():
+    got = pack._normalize_github_repo(
+        {
+            "full_name": "octocat/pack",
+            "owner": {"login": "octocat"},
+            "description": "a pack",
+            "stargazers_count": 42,
+            "pushed_at": "2026-06-01T00:00:00Z",
+            "archived": True,
+        }
+    )
+    assert got == {
+        "full_name": "octocat/pack",
+        "owner": "octocat",
+        "url": "https://github.com/octocat/pack",
+        "description": "a pack",
+        "stars": 42,
+        "pushed_at": "2026-06-01T00:00:00Z",
+        "archived": True,
+    }
+
+
+def test_forks_invalid_name_is_400():
+    resp = _get(pack.forks, name="../escape")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "not_found"
+
+
+def test_forks_not_found_for_non_git_pack(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "plain").mkdir()
+    _set_roots(root)
+    resp = _get(pack.forks, name="plain")
+    assert resp.status == 404
+
+
+def test_forks_empty_for_non_github_remote(tmp_path):
+    # A pack whose origin is not github (here: a local path) still answers with
+    # its current remote so the UI can offer the paste-a-URL fallback.
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    _init_seed(tmp_path / "seed", origin)
+    root = tmp_path / "cn"
+    root.mkdir()
+    _clone(origin, root / "pack")
+    _set_roots(root)
+
+    body = _get(pack.forks, name="pack").json_body
+    assert body["ok"] is True
+    assert body["current"] == str(origin)
+    assert body["parent"] is None
+    assert body["source"] is None
+    assert body["forks"] == []
+
+
+def _github_pack(monkeypatch, tmp_path, remote="https://github.com/me/pack"):
+    """A git pack reporting a GitHub origin (nothing is ever fetched).
+
+    The reported URL is stubbed rather than configured with ``git remote
+    set-url``: ``git remote get-url`` applies any host-level ``url.<base>
+    .insteadOf`` rewrite, so a developer (or CI sandbox) that proxies github.com
+    would otherwise see a rewritten URL here and the test would test nothing.
+    """
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    _init_seed(tmp_path / "seed", origin)
+    root = tmp_path / "cn"
+    root.mkdir()
+    _clone(origin, root / "pack")
+    _set_roots(root)
+    monkeypatch.setattr(pack, "_remote_url", lambda cwd, name="origin": remote)
+    return root / "pack"
+
+
+def test_forks_lists_upstream_and_siblings_from_the_root_repo(monkeypatch, tmp_path):
+    _github_pack(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append(path)
+        if path == "/repos/me/pack":
+            return {
+                "full_name": "me/pack",
+                "parent": {"full_name": "root-org/pack", "stargazers_count": 900},
+                "source": {"full_name": "root-org/pack", "stargazers_count": 900},
+            }
+        if path == "/repos/root-org/pack/forks":
+            return [
+                {"full_name": "me/pack", "stargazers_count": 3},
+                {"full_name": "other/pack", "stargazers_count": 11},
+                {"full_name": "junk-entry"},  # unusable — dropped
+            ]
+        return None
+
+    monkeypatch.setattr(pack, "_github_get", fake_get)
+    body = _get(pack.forks, name="pack").json_body
+
+    # Siblings come from the ROOT of the fork network, not from this fork
+    # (whose own /forks would be empty).
+    assert "/repos/root-org/pack/forks" in calls
+    assert body["parent"]["full_name"] == "root-org/pack"
+    assert body["source"] is None  # parent IS the source — not listed twice
+    assert [f["full_name"] for f in body["forks"]] == ["me/pack", "other/pack"]
+
+
+def test_forks_degrade_to_empty_when_the_github_api_is_unavailable(monkeypatch, tmp_path):
+    _github_pack(monkeypatch, tmp_path)
+    monkeypatch.setattr(pack, "_github_get", lambda path, params=None: None)
+    body = _get(pack.forks, name="pack").json_body
+    assert body["ok"] is True
+    assert body["parent"] is None
+    assert body["forks"] == []
+
+
+def test_collect_forks_lists_own_forks_when_the_pack_is_not_a_fork(monkeypatch):
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append(path)
+        if path.endswith("/forks"):
+            return [{"full_name": "downstream/pack"}]
+        return {"full_name": "me/pack", "parent": None, "source": None}
+
+    monkeypatch.setattr(pack, "_github_get", fake_get)
+    got = pack._collect_forks("https://github.com/me/pack")
+    assert "/repos/me/pack/forks" in calls
+    assert [f["full_name"] for f in got["forks"]] == ["downstream/pack"]
 
 
 # ===========================================================================
@@ -839,6 +995,285 @@ def test_update_force_checks_out_ref_on_dirty_tree(tmp_path):
     ref = pack._parse_ref(str(root / "pack"))
     assert ref["type"] == "tag" and ref["name"] == "v9.9.9"
     assert pack._is_dirty(str(root / "pack")) is False
+
+
+# ===========================================================================
+# POST /touch_manager/remote — switch a pack to a different fork
+# ===========================================================================
+
+
+def _seed_fork(path, origin, *, branch="main", files=None):
+    """Seed a second upstream ('a fork') with its own content on ``branch``."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "-b", branch)
+    _git(path, "remote", "add", "origin", str(origin))
+    for name, content in (files or {"FORK.md": "fork\n"}).items():
+        (path / name).write_text(content)
+    _git(path, "add", ".")
+    _git(path, "commit", "-m", "fork c1")
+    _git(path, "push", "-u", "origin", branch)
+    return path
+
+
+def _fork_setup(tmp_path, *, fork_branch="main", fork_files=None):
+    """A pack cloned from origin A, plus an unrelated 'fork' B to switch to.
+
+    Returns (pack_dir, origin_bare, fork_bare, fork_seed). Everything is local —
+    the switch does a real fetch + checkout with no network.
+    """
+    origin = tmp_path / "origin.git"
+    _init_bare(origin)
+    _init_seed(tmp_path / "seed", origin)
+
+    fork = tmp_path / "fork.git"
+    _init_bare(fork, fork_branch)
+    fork_seed = _seed_fork(tmp_path / "fork-seed", fork, branch=fork_branch, files=fork_files)
+
+    root = tmp_path / "cn"
+    root.mkdir()
+    _clone(origin, root / "pack")
+    _set_roots(root)
+    return root / "pack", origin, fork, fork_seed
+
+
+def test_do_remote_switch_repoints_origin_and_checks_out_its_default_branch(tmp_path):
+    pack_dir, origin, fork, _ = _fork_setup(tmp_path)
+    result, err, code = pack._do_remote_switch(str(pack_dir), str(fork), None)
+
+    assert (err, code) == ("", "")
+    assert result["ref"] == "main"
+    assert result["remote_before"] == str(origin)
+    assert result["remote_after"] == str(fork)
+    assert result["before_short"] != result["after_short"]
+    assert result["changed_files"] > 0
+    # The working tree is the fork's, the directory name is untouched, and
+    # origin now points at the fork.
+    assert (pack_dir / "FORK.md").is_file()
+    assert not (pack_dir / "README.md").exists()
+    assert pack._remote_url(str(pack_dir)) == str(fork)
+    assert pack_dir.name == "pack"
+
+
+def test_do_remote_switch_follows_the_new_remotes_own_default_branch(tmp_path):
+    # The fork's default is "trunk" while the pack was on "main" — the switch
+    # must land on the NEW remote's default, not reuse the old branch name.
+    pack_dir, _, fork, _ = _fork_setup(tmp_path, fork_branch="trunk")
+    result, err, _ = pack._do_remote_switch(str(pack_dir), str(fork), None)
+    assert err == ""
+    assert result["ref"] == "trunk"
+    ref = pack._parse_ref(str(pack_dir))
+    assert (ref["type"], ref["name"]) == ("branch", "trunk")
+
+
+def test_do_remote_switch_tracks_the_new_remote_so_later_updates_fast_forward(tmp_path):
+    pack_dir, _, fork, fork_seed = _fork_setup(tmp_path)
+    pack._do_remote_switch(str(pack_dir), str(fork), None)
+
+    # A new commit on the fork now registers as "behind" for the ordinary
+    # update check — i.e. the local branch really tracks origin/main.
+    (fork_seed / "FORK.md").write_text("fork c2\n")
+    _git(fork_seed, "add", ".")
+    _git(fork_seed, "commit", "-m", "fork c2")
+    _git(fork_seed, "push", "origin", "main")
+
+    info = pack._check_one_update(str(pack_dir), "pack")
+    assert info["update_available"] is True
+    assert info["behind"] == 1
+
+
+def test_do_remote_switch_checks_out_an_explicit_tag_detached(tmp_path):
+    pack_dir, _, fork, fork_seed = _fork_setup(tmp_path)
+    _git(fork_seed, "tag", "v9.9.9")
+    _git(fork_seed, "push", "origin", "v9.9.9")
+
+    result, err, _ = pack._do_remote_switch(str(pack_dir), str(fork), "v9.9.9")
+    assert err == ""
+    assert result["ref"] == "v9.9.9"
+    assert pack._parse_ref(str(pack_dir))["type"] == "tag"
+
+
+def test_do_remote_switch_restores_the_old_remote_when_the_fetch_fails(tmp_path):
+    pack_dir, origin, _, _ = _fork_setup(tmp_path)
+    result, err, code = pack._do_remote_switch(str(pack_dir), str(tmp_path / "nope.git"), None)
+
+    assert result is None
+    assert code == "fetch_failed"
+    assert err
+    # Nothing moved: the pack still points at (and contains) the original repo.
+    assert pack._remote_url(str(pack_dir)) == str(origin)
+    assert (pack_dir / "README.md").is_file()
+
+
+def test_do_remote_switch_refuses_a_dirty_tree_then_succeeds_with_force(tmp_path):
+    pack_dir, origin, fork, _ = _fork_setup(tmp_path)
+    (pack_dir / "README.md").write_text("local edit\n")
+
+    result, _, code = pack._do_remote_switch(str(pack_dir), str(fork), None)
+    assert result is None
+    assert code == "checkout_failed"
+    # The failed switch left both the remote and the local edit alone.
+    assert pack._remote_url(str(pack_dir)) == str(origin)
+    assert (pack_dir / "README.md").read_text() == "local edit\n"
+
+    result, err, _ = pack._do_remote_switch(str(pack_dir), str(fork), None, True)
+    assert err == ""
+    assert (pack_dir / "FORK.md").is_file()
+    assert pack._remote_url(str(pack_dir)) == str(fork)
+
+
+def test_do_remote_switch_keeps_untracked_files_when_forced(tmp_path):
+    pack_dir, _, fork, _ = _fork_setup(tmp_path)
+    (pack_dir / "README.md").write_text("local edit\n")
+    (pack_dir / "my-notes.txt").write_text("mine\n")
+
+    _, err, _ = pack._do_remote_switch(str(pack_dir), str(fork), None, True)
+    assert err == ""
+    assert (pack_dir / "my-notes.txt").read_text() == "mine\n"
+
+
+def test_do_remote_switch_adds_an_origin_to_a_pack_that_has_none(tmp_path):
+    root = tmp_path / "cn"
+    root.mkdir()
+    plain = root / "plain"
+    _init_plain(plain)
+    _set_roots(root)
+    fork = tmp_path / "fork.git"
+    _init_bare(fork)
+    _seed_fork(tmp_path / "fork-seed", fork)
+
+    result, err, _ = pack._do_remote_switch(str(plain), str(fork), None)
+    assert err == ""
+    assert result["remote_before"] is None
+    assert pack._remote_url(str(plain)) == str(fork)
+
+
+def test_do_remote_switch_flags_a_dependency_change(tmp_path):
+    pack_dir, _, fork, _ = _fork_setup(
+        tmp_path, fork_files={"FORK.md": "fork\n", "requirements.txt": "numpy\n"}
+    )
+    result, err, _ = pack._do_remote_switch(str(pack_dir), str(fork), None)
+    assert err == ""
+    assert result["deps_changed"] is True
+
+
+def _loopback(monkeypatch):
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", raising=False)
+
+
+def test_remote_switch_blocked_on_non_loopback(monkeypatch, tmp_path):
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL", raising=False)
+    pack_dir, origin, _, _ = _fork_setup(tmp_path)
+    resp = _post(pack.remote, name="pack", url="https://github.com/other/pack")
+    assert resp.status == 403
+    assert resp.json_body["code"] == "blocked_remote_bind"
+    assert pack._remote_url(str(pack_dir)) == str(origin)  # untouched
+
+
+def test_remote_switch_rejects_a_non_allowlisted_url(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    pack_dir, origin, _, _ = _fork_setup(tmp_path)
+    resp = _post(pack.remote, name="pack", url="https://evil.example.com/a/b")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "invalid_url"
+    assert pack._remote_url(str(pack_dir)) == str(origin)
+
+
+def test_remote_switch_rejects_option_injection_ref_before_touching_git(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    pack_dir, origin, _, _ = _fork_setup(tmp_path)
+    resp = _post(
+        pack.remote,
+        name="pack",
+        url="https://github.com/other/pack",
+        ref="--upload-pack=touch /tmp/pwned",
+    )
+    assert resp.status == 400
+    assert resp.json_body["code"] == "checkout_failed"
+    assert pack._remote_url(str(pack_dir)) == str(origin)
+
+
+def test_remote_switch_not_found_is_404(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    root = tmp_path / "cn"
+    root.mkdir()
+    _set_roots(root)
+    resp = _post(pack.remote, name="ghost", url="https://github.com/other/pack")
+    assert resp.status == 404
+
+
+def test_remote_switch_not_git_is_400(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    root = tmp_path / "cn"
+    root.mkdir()
+    (root / "plain").mkdir()
+    _set_roots(root)
+    resp = _post(pack.remote, name="plain", url="https://github.com/other/pack")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "not_git"
+
+
+def test_remote_switch_dirty_without_force_is_409(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    pack_dir, origin, _, _ = _fork_setup(tmp_path)
+    (pack_dir / "README.md").write_text("local edit\n")
+    resp = _post(pack.remote, name="pack", url="https://github.com/other/pack")
+    assert resp.status == 409
+    assert resp.json_body["code"] == "dirty"
+    # Refused before any git write: the remote and the edit both survive.
+    assert pack._remote_url(str(pack_dir)) == str(origin)
+    assert (pack_dir / "README.md").read_text() == "local edit\n"
+
+
+def test_remote_switch_end_to_end_installs_the_new_deps(monkeypatch, tmp_path, stub_pip):
+    _loopback(monkeypatch)
+    pack_dir, _, fork, _ = _fork_setup(
+        tmp_path, fork_files={"FORK.md": "fork\n", "requirements.txt": "numpy\n"}
+    )
+    # The URL gate is exercised on its own above; here it stands aside so the
+    # real git switch can run against a local path with no network.
+    monkeypatch.setattr(pack, "_validate_url", lambda url: ("pack", None))
+
+    resp = _post(pack.remote, name="pack", url=str(fork))
+    body = resp.json_body
+    assert resp.status == 200
+    assert body["ok"] is True
+    assert body["name"] == "pack"
+    assert body["ref"] == "main"
+    assert body["remote_after"] == str(fork)
+    assert body["restart_required"] is True
+    assert body["deps"]["attempted"] is True
+    assert body["deps"]["sources"] == ["requirements.txt"]
+    assert (pack_dir / "FORK.md").is_file()
+    assert len(stub_pip) == 1
+
+
+def test_remote_switch_skips_pip_when_no_dependency_file_changed(monkeypatch, tmp_path, stub_pip):
+    _loopback(monkeypatch)
+    _, _, fork, _ = _fork_setup(tmp_path)
+    monkeypatch.setattr(pack, "_validate_url", lambda url: ("pack", None))
+    body = _post(pack.remote, name="pack", url=str(fork)).json_body
+    assert body["deps"] == {
+        "attempted": False,
+        "ok": None,
+        "sources": [],
+        "error": None,
+        "log": "",
+    }
+    assert stub_pip == []
+
+
+def test_remote_switch_force_discards_local_changes(monkeypatch, tmp_path):
+    _loopback(monkeypatch)
+    pack_dir, _, fork, _ = _fork_setup(tmp_path)
+    (pack_dir / "README.md").write_text("local edit\n")
+    monkeypatch.setattr(pack, "_validate_url", lambda url: ("pack", None))
+
+    resp = _post(pack.remote, name="pack", url=str(fork), force=True)
+    assert resp.status == 200
+    assert (pack_dir / "FORK.md").is_file()
+    assert not (pack_dir / "README.md").exists()
 
 
 # ===========================================================================
@@ -1223,6 +1658,126 @@ def test_enable_rejects_unsafe_name(tmp_path):
     resp = _post(pack.enable, name="../escape")
     assert resp.status == 404
     assert resp.json_body["code"] == "not_found"
+
+
+# ===========================================================================
+# POST /touch_manager/delete — irreversible removal
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("listen", "remote_env", "expected"),
+    [
+        ("", None, True),  # loopback → allowed by default
+        ("127.0.0.1", None, True),
+        ("0.0.0.0", None, False),  # non-loopback, no opt-in → denied
+        ("0.0.0.0", "1", True),  # non-loopback + remote opt-in → allowed
+        ("192.168.1.10", None, False),
+    ],
+)
+def test_delete_gate_predicate(monkeypatch, listen, remote_env, expected):
+    monkeypatch.setattr(comfy.cli_args.args, "listen", listen)
+    if remote_env is None:
+        monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", raising=False)
+    else:
+        monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", remote_env)
+    assert pack._delete_allowed() is expected
+
+
+def _deletable(monkeypatch, tmp_path, name="pack", *, contents=True):
+    """A loopback bind and one pack directory with a file in it."""
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", raising=False)
+    root = tmp_path / "cn"
+    root.mkdir()
+    target = root / name
+    target.mkdir()
+    if contents:
+        (target / "node.py").write_text("x\n")
+    _set_roots(root)
+    return root, target
+
+
+def test_delete_removes_the_pack_directory(monkeypatch, tmp_path):
+    root, target = _deletable(monkeypatch, tmp_path)
+    resp = _post(pack.delete, name="pack")
+    assert resp.status == 200
+    assert resp.json_body["ok"] is True
+    assert resp.json_body["restart_required"] is True
+    assert not target.exists()
+    assert root.is_dir()  # only the pack went
+
+
+def test_delete_removes_a_disabled_pack(monkeypatch, tmp_path):
+    root, _ = _deletable(monkeypatch, tmp_path, "pack.disabled")
+    resp = _post(pack.delete, name="pack")
+    assert resp.status == 200
+    assert not (root / "pack.disabled").exists()
+
+
+def test_delete_not_found(monkeypatch, tmp_path):
+    _deletable(monkeypatch, tmp_path)
+    resp = _post(pack.delete, name="ghost")
+    assert resp.status == 404
+    assert resp.json_body["code"] == "not_found"
+
+
+def test_delete_rejects_unsafe_name(monkeypatch, tmp_path):
+    root, target = _deletable(monkeypatch, tmp_path)
+    resp = _post(pack.delete, name="../cn")
+    assert resp.status == 404
+    assert resp.json_body["code"] == "not_found"
+    assert target.is_dir()
+    assert root.is_dir()
+
+
+def test_delete_blocked_on_non_loopback(monkeypatch, tmp_path):
+    _, target = _deletable(monkeypatch, tmp_path)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    resp = _post(pack.delete, name="pack")
+    assert resp.status == 403
+    assert resp.json_body["code"] == "delete_disabled"
+    assert target.is_dir()  # nothing removed
+
+
+def test_delete_allowed_on_non_loopback_with_remote_env(monkeypatch, tmp_path):
+    _, target = _deletable(monkeypatch, tmp_path)
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "0.0.0.0")
+    monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", "1")
+    assert _post(pack.delete, name="pack").status == 200
+    assert not target.exists()
+
+
+def test_delete_refuses_a_symlinked_pack_and_spares_its_target(monkeypatch, tmp_path):
+    # A pack dir that is a symlink resolves OUTSIDE its custom_nodes root —
+    # deleting through it would take someone else's files with it.
+    monkeypatch.setattr(comfy.cli_args.args, "listen", "")
+    root = tmp_path / "cn"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep\n")
+    os.symlink(outside, root / "pack")
+    _set_roots(root)
+
+    resp = _post(pack.delete, name="pack")
+    assert resp.status == 400
+    assert resp.json_body["code"] == "invalid_target"
+    assert (outside / "keep.txt").is_file()
+    assert (root / "pack").is_symlink()
+
+
+def test_delete_reports_a_filesystem_failure(monkeypatch, tmp_path):
+    _deletable(monkeypatch, tmp_path)
+
+    def boom(path):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(pack.shutil, "rmtree", boom)
+    resp = _post(pack.delete, name="pack")
+    assert resp.status == 500
+    assert resp.json_body["code"] == "delete_failed"
+    assert "device busy" in resp.json_body["error"]
 
 
 # ===========================================================================

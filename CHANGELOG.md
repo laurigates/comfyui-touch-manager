@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.17...comfyui-touch-manager-v0.1.18) (2026-07-27)
+
+
+### Features
+
+* uninstall packs for good and switch a pack to a different fork ([#53](https://github.com/laurigates/comfyui-touch-manager/issues/53)) ([5417abe](https://github.com/laurigates/comfyui-touch-manager/commit/5417abe796a1c4cc9c0c1b046036af617a632493))
+
 ## [0.1.17](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.16...comfyui-touch-manager-v0.1.17) (2026-07-21)
 
 

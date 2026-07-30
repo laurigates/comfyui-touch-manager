@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.19](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.18...comfyui-touch-manager-v0.1.19) (2026-07-30)
+
+
+### Bug Fixes
+
+* **assets:** sync the just assets recipe with the scaffold template ([#57](https://github.com/laurigates/comfyui-touch-manager/issues/57)) ([a08295c](https://github.com/laurigates/comfyui-touch-manager/commit/a08295c944fb464c52f1273fc661828fa13fc0c0))
+
 ## [0.1.18](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.17...comfyui-touch-manager-v0.1.18) (2026-07-27)
 
 

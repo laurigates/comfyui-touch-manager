@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.20](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.19...comfyui-touch-manager-v0.1.20) (2026-08-04)
+
+
+### Bug Fixes
+
+* **deps:** bump @laurigates/comfy-modal-kit ^0.6.0 -&gt; ^0.10.0 ([5ff6bce](https://github.com/laurigates/comfyui-touch-manager/commit/5ff6bce3a7a870723a71bcea50be85ca43473b02))
+* **deps:** bump @laurigates/comfy-modal-kit to ^0.10.0 (toast-tap dismisses modal) ([#59](https://github.com/laurigates/comfyui-touch-manager/issues/59)) ([5ff6bce](https://github.com/laurigates/comfyui-touch-manager/commit/5ff6bce3a7a870723a71bcea50be85ca43473b02))
+
 ## [0.1.19](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.18...comfyui-touch-manager-v0.1.19) (2026-07-30)
 
 

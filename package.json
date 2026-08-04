@@ -2,7 +2,7 @@
   "name": "comfyui-touch-manager",
   "private": true,
   "type": "module",
-  "description": "Touch-first node/extension manager for ComfyUI: check updates, update nodes and core, install from a GitHub URL, select versions, fuzzy search \u2014 mobile-friendly. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
+  "description": "Touch-first node/extension manager for ComfyUI: check updates, update nodes and core, install from a GitHub URL, select versions, fuzzy search — mobile-friendly. TypeScript source in src/, built to web/dist/ via bun build. The @laurigates/comfy-modal-kit primitives are inlined by bun build. See ADR-0001.",
   "scripts": {
     "build": "bun build ./src/index.ts --target browser --format esm --banner '/*!\n * comfyui-touch-manager - web/dist/index.js (generated frontend bundle)\n * Built by bun from this repo TypeScript src/ - not hand-written. It inlines\n * ONE first-party dependency, marked below by its bun module-path comment:\n * // node_modules/@laurigates/comfy-modal-kit/dist/index.js\n *\n *   PackageURL:  pkg:npm/@laurigates/comfy-modal-kit@0.6.0\n *   SPDX-License-Identifier: MIT\n *   Source repo: https://github.com/laurigates/comfy-modal-kit\n *   npm:         https://www.npmjs.com/package/@laurigates/comfy-modal-kit\n *\n * Upstream origin, for registry vendored-code scanners: this is NOT\n * unattributed third-party vendored code. The bundled package is FIRST-PARTY,\n * published to npm with build provenance (SLSA, signed via GitHub Actions)\n * attesting it was built from the source repo above. The npm scope @laurigates,\n * the GitHub org laurigates, and this pack Comfy Registry PublisherId laurigates\n * (see pyproject.toml [tool.comfy]) are one and the same author/identity.\n * Verify: npm view @laurigates/comfy-modal-kit dist.attestations\n */' --outdir web/dist --external '/scripts/*'",
     "typecheck": "tsc --noEmit",
@@ -12,7 +12,7 @@
     "knip": "knip"
   },
   "dependencies": {
-    "@laurigates/comfy-modal-kit": "^0.6.0"
+    "@laurigates/comfy-modal-kit": "^0.10.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.15",

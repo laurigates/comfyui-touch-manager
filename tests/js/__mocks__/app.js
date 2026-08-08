@@ -24,6 +24,14 @@ export const __responses = {};
 // "fail" and the next one succeed.
 export const __fetchControl = { failNext: 0 };
 
+// Every object passed to app.registerExtension, in call order. index.ts
+// registers exactly one at module evaluation; the sidebar suite reads its
+// `setup` / `commands` / `actionBarButtons` off it.
+export const __registered = [];
+
+// Every tab passed to extensionManager.registerSidebarTab, in call order.
+export const __sidebarTabs = [];
+
 export function __reset() {
   __fetchCalls.length = 0;
   __fetchBodies.length = 0;
@@ -32,7 +40,9 @@ export function __reset() {
 }
 
 export const app = {
-  registerExtension() {},
+  registerExtension(ext) {
+    __registered.push(ext);
+  },
   graph: { _nodes: [] },
   extensionManager: {
     toast: { add() {} },
@@ -41,7 +51,17 @@ export const app = {
       prompt: async () => null,
     },
     setting: { get: () => false, set() {} },
-    registerSidebarTab() {},
+    registerSidebarTab(tab) {
+      __sidebarTabs.push(tab);
+    },
+    // The sidebar-panel surface the pack collapses. Runtime-only on the real
+    // frontend (not on the public ExtensionManager interface), which is why the
+    // pack feature-detects it.
+    sidebarTab: { activeSidebarTabId: null },
+    // The command store the toggle-command override writes into. Empty by
+    // default, so overrideToggleCommand() reports the fallback route unless a
+    // test pushes a command with the auto-generated id.
+    command: { commands: [] },
   },
   api: {
     apiURL: (path) => path,

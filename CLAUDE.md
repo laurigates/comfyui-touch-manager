@@ -14,11 +14,12 @@ A mobile-first ComfyUI usability pack: a frontend extension that intercepts a wi
 | `src/comfyui-shims.d.ts` | Types the `/scripts/app.js` runtime import (via the `paths` mapping in `tsconfig.json`). |
 | `__init__.py` | Loader stub. Imports node mappings from the backend module; exports `WEB_DIRECTORY = "./web/dist"`. |
 | `touch_manager.py` | Node + HTTP endpoints. Bundled libs only; arbitrary-path endpoints gate on an extension whitelist. |
-| `web/dist/` | **Generated** by `bun run build` (git-ignored). ComfyUI serves it at `/extensions/comfyui-touch-manager/`. |
+| `web/dist/` | **Generated** by `bun run build` and **tracked in git** — commit it in the same commit as the source change. ComfyUI serves it at `/extensions/comfyui-touch-manager/`. ComfyUI-Manager updates packs over git, and `fetch && merge --ff-only` cannot pull an ignored path, so ignoring it would make every update report success while ComfyUI kept serving the stale bundle. CI enforces it with `git diff --exit-code -- web/dist`. |
 | `pyproject.toml` | Comfy Registry metadata. `PublisherId` + `version` are the fields you touch; `[tool.comfy] includes = ["web/dist"]` force-ships the built output. |
 | `tsconfig.json` / `biome.json` / `knip.json` | Strict TS config, Biome lint/format, knip dead-code. |
 | `.github/workflows/` | `ci.yml` (tsc+build/biome/vitest/ruff/pytest/gitleaks), `publish.yml` (builds then publishes on version bump), `release-please.yml`. |
 | `tests/js/` | Vitest suite importing the `.ts` source directly. `tests/test_init.py` is the pytest backend suite. |
+| `tests/mutations.json` | Drives `just mutation-check comfyui-touch-manager` from the workspace root — breaks each pinned sidebar mechanism in turn and reports which test went red. Carries a deliberate **CONTROL** mutation the suite must MISS, so the recipe exits **1** on a healthy run: read the report, not the exit code. Add a mutation whenever you add a regression assertion (`.claude/rules/modal-pack-test-tiers.md`). |
 | `justfile` | `build`, `lint`, `format`, `test`, `check` recipes — the local CI gate. |
 
 ## Hard rules

@@ -1,0 +1,66 @@
+{
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/sidebar-tab.test.js"
+  ],
+  "reporter": "vitest-json",
+  "mutations": [
+    {
+      "label": "the deleted fallback button comes back (panel is no longer empty)",
+      "file": "src/index.ts",
+      "before": "          container.replaceChildren();",
+      "after": "          container.replaceChildren(document.createElement(\"button\"));"
+    },
+    {
+      "label": "render-collapse fallback removed (the panel stays open behind the modal)",
+      "file": "src/index.ts",
+      "before": "          collapseSidebarPanel();",
+      "after": "          void 0;"
+    },
+    {
+      "label": "collapse stops checking the tab id (closes somebody else's panel)",
+      "file": "src/index.ts",
+      "before": "if (st && st.activeSidebarTabId === \"touch-manager\") st.activeSidebarTabId = null;",
+      "after": "if (st) st.activeSidebarTabId = null;"
+    },
+    {
+      "label": "modal idempotence guard removed (a re-fired render stacks a second modal)",
+      "file": "src/index.ts",
+      "before": "if (!document.querySelector(\".cmp-dialog\")) safeOpen();",
+      "after": "safeOpen();"
+    },
+    {
+      "label": "override read-back removed (reports the override route on a swallowed write)",
+      "file": "src/index.ts",
+      "before": "    return cmd.function === fn;",
+      "after": "    return true;"
+    },
+    {
+      "label": "hub button spread dropped (no family action-bar button at all)",
+      "file": "src/index.ts",
+      "before": "  ...installHubButton(),",
+      "after": "  ...{},"
+    },
+    {
+      "label": "chooser row no longer registered from setup()",
+      "file": "src/index.ts",
+      "before": "    registerHubEntry(entry.hubEntry);",
+      "after": "    void entry.hubEntry;"
+    },
+    {
+      "label": "override route loses the shared idempotence guard (rebuilds a modal in use)",
+      "file": "src/index.ts",
+      "before": "const fn = (): void => {\n      openIfNoModal();",
+      "after": "const fn = (): void => {\n      safeOpen();"
+    },
+    {
+      "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
+      "file": "src/index.ts",
+      "before": "BOTH sidebar routes must share this guard, and the sharing is the point.",
+      "after": "BOTH sidebar routes share this guard; that sharing is the whole point."
+    }
+  ]
+}

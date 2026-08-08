@@ -4,7 +4,7 @@
  * ONE first-party dependency, marked below by its bun module-path comment:
  * // node_modules/@laurigates/comfy-modal-kit/dist/index.js
  *
- *   PackageURL:  pkg:npm/@laurigates/comfy-modal-kit@0.6.0
+ *   PackageURL:  pkg:npm/@laurigates/comfy-modal-kit@0.11.0
  *   SPDX-License-Identifier: MIT
  *   Source repo: https://github.com/laurigates/comfy-modal-kit
  *   npm:         https://www.npmjs.com/package/@laurigates/comfy-modal-kit
@@ -19,6 +19,44 @@
  */
 
 // node_modules/@laurigates/comfy-modal-kit/dist/index.js
+function installBackGuard(onBack) {
+  if (typeof window === "undefined" || typeof history === "undefined")
+    return () => {};
+  let armed = false;
+  let disposed = false;
+  const arm = () => {
+    history.pushState({ cmpBackGuard: true }, "");
+    armed = true;
+  };
+  const dispose = (opts) => {
+    if (disposed)
+      return;
+    disposed = true;
+    window.removeEventListener("popstate", onPop);
+    if (armed) {
+      armed = false;
+      if (opts?.pop !== false)
+        history.back();
+    }
+  };
+  function onPop() {
+    armed = false;
+    let handled = false;
+    try {
+      handled = onBack();
+    } catch (e) {
+      console.error("[comfy-modal-kit] back handler threw", e);
+    }
+    if (handled && !disposed) {
+      arm();
+      return;
+    }
+    dispose();
+  }
+  arm();
+  window.addEventListener("popstate", onPop);
+  return dispose;
+}
 var KEY = Symbol.for("laurigates.comfyModalKit");
 function getKit() {
   const g = globalThis;
@@ -30,7 +68,9 @@ function getKit() {
       activeModal: null,
       pointerClaim: null,
       modalChrome: [],
-      pointerGuardInstalled: false
+      pointerGuardInstalled: false,
+      hubEntries: [],
+      hubLauncherInstalled: false
     };
     g[KEY] = kit;
   }
@@ -40,6 +80,8 @@ function getKit() {
     kit.modelPickers = [];
   if (!kit.modalChrome)
     kit.modalChrome = [];
+  if (!kit.hubEntries)
+    kit.hubEntries = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -55,6 +97,18 @@ var SORT_OPTIONS = [
   { value: "rating:asc", label: "Lowest rating" }
 ];
 var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+function registerHubEntry(entry) {
+  const list = getKit().hubEntries;
+  const i = list.findIndex((e) => e.id === entry.id);
+  if (i >= 0) {
+    list.splice(i, 1, entry);
+  } else {
+    list.push(entry);
+  }
+}
+function getHubEntries() {
+  return [...getKit().hubEntries].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+}
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
   installPointerGuard();
@@ -397,109 +451,6 @@ function makeLauncher(opts) {
   }
   return fields;
 }
-function fuzzyScore(query, target) {
-  if (!query)
-    return { score: 0, matches: [] };
-  if (!target)
-    return null;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  const matches = [];
-  let qi = 0;
-  let score = 0;
-  let consecutive = 0;
-  let prevMatchIdx = -1;
-  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
-    if (t[ti] !== q[qi]) {
-      consecutive = 0;
-      continue;
-    }
-    let charScore = 1;
-    if (ti === 0) {
-      charScore += 5;
-    } else {
-      const prev = t[ti - 1];
-      const orig = target[ti];
-      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
-        charScore += 4;
-      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
-        charScore += 3;
-      }
-    }
-    if (ti === prevMatchIdx + 1) {
-      consecutive++;
-      charScore += consecutive * 2;
-    } else {
-      consecutive = 0;
-    }
-    score += charScore;
-    matches.push(ti);
-    prevMatchIdx = ti;
-    qi++;
-  }
-  if (qi < q.length)
-    return null;
-  score -= target.length * 0.01;
-  return { score, matches };
-}
-function fuzzyRank(query, fields, primaryWeight = 10) {
-  if (!query)
-    return { score: 0, primaryMatches: [] };
-  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length)
-    return { score: 0, primaryMatches: [] };
-  const primary = fields[0] || "";
-  const rest = fields.slice(1).filter((f) => Boolean(f));
-  let totalScore = 0;
-  const primaryMatchSet = new Set;
-  for (const token of tokens) {
-    const primaryResult = fuzzyScore(token, primary);
-    let best = primaryResult ? {
-      score: primaryResult.score * primaryWeight,
-      matches: primaryResult.matches,
-      onPrimary: true
-    } : null;
-    for (const field of rest) {
-      const r = fuzzyScore(token, field);
-      if (r && (!best || r.score > best.score)) {
-        best = { score: r.score, matches: r.matches, onPrimary: false };
-      }
-    }
-    if (!best)
-      return null;
-    totalScore += best.score;
-    if (best.onPrimary) {
-      for (const i of best.matches)
-        primaryMatchSet.add(i);
-    }
-  }
-  return {
-    score: totalScore,
-    primaryMatches: [...primaryMatchSet].sort((a, b) => a - b)
-  };
-}
-function highlightMatches(target, matchIndices) {
-  const frag = document.createDocumentFragment();
-  if (!target)
-    return frag;
-  const set = new Set(matchIndices || []);
-  if (!set.size) {
-    frag.appendChild(document.createTextNode(target));
-    return frag;
-  }
-  for (let i = 0;i < target.length; i++) {
-    const ch = target[i];
-    if (set.has(i)) {
-      const m = document.createElement("span");
-      m.className = "cmp-match";
-      m.textContent = ch;
-      frag.appendChild(m);
-    } else {
-      frag.appendChild(document.createTextNode(ch));
-    }
-  }
-  return frag;
-}
 var STYLE_ID2 = "cmp-shell-style";
 var CSS2 = `
 .cmp-backdrop {
@@ -560,8 +511,11 @@ var CSS2 = `
     color: #aaa;
     border: 1px solid #3a3a44;
     border-radius: 4px;
-    width: 36px;
-    height: 36px;
+    /* 44px, not 36: docs/modal-ux-drift-catalog.md:71 sets the family's D02
+       target at >=44px, and the Touch Tools chooser cannot credibly promise
+       >=44px rows while inheriting a 36px close control. */
+    width: 44px;
+    height: 44px;
     cursor: pointer;
     font-size: 20px;
     line-height: 1;
@@ -793,6 +747,306 @@ function openModalShell(opts = {}) {
     });
   }
   return controller;
+}
+var HUB_LABEL = "Touch Tools";
+var HUB_ICON = "pi pi-mobile";
+var HUB_STYLE_ID = "cmk-hub-style";
+var SETTINGS_COMMAND = "Comfy.ShowSettingsDialog";
+var HUB_CSS = `
+.cmk-hub-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px;
+}
+.cmk-hub-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    /* >=44px is the family's D02 touch-target floor; 48 for comfort. */
+    min-height: 48px;
+    padding: 8px 12px;
+    background: #21212a;
+    color: #e8e8ea;
+    border: 1px solid #3a3a44;
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+    touch-action: manipulation;
+}
+.cmk-hub-row:hover {
+    background: #2a2a36;
+    border-color: #4a4a58;
+}
+.cmk-hub-icon {
+    font-size: 18px;
+    color: #9ec6ff;
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+}
+.cmk-hub-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.cmk-hub-label {
+    font-weight: 600;
+    font-size: 14px;
+}
+.cmk-hub-desc {
+    color: #9a9aa4;
+    font-size: 12px;
+}
+.cmk-hub-sep {
+    height: 1px;
+    background: #2a2a32;
+    margin: 8px 4px;
+}
+.cmk-hub-empty {
+    color: #9a9aa4;
+    font-size: 13px;
+    padding: 10px 12px;
+}
+.cmk-hub-note {
+    color: #777;
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 10px 12px 4px;
+}
+`;
+function makeHubEntry(opts) {
+  const fields = makeLauncher({ ...opts, actionBar: false });
+  const hubEntry = {
+    id: opts.id,
+    label: opts.label,
+    icon: opts.icon,
+    description: opts.description,
+    priority: opts.priority,
+    open: fields.commands[0]?.function ?? opts.open
+  };
+  return { ...fields, hubEntry };
+}
+function installHubButton() {
+  const kit = getKit();
+  if (kit.hubLauncherInstalled)
+    return {};
+  kit.hubLauncherInstalled = true;
+  return {
+    actionBarButtons: [
+      {
+        icon: HUB_ICON,
+        label: HUB_LABEL,
+        tooltip: "Touch Tools — open a touch-first tool",
+        class: "!h-11 !min-w-11",
+        onClick: () => {
+          const entries = getHubEntries();
+          if (entries.length === 1) {
+            try {
+              entries[0]?.open();
+            } catch (e) {
+              console.error("[comfy-modal-kit] hub single-entry open failed", e);
+            }
+            return;
+          }
+          openTouchToolsHub();
+        }
+      }
+    ]
+  };
+}
+function executeCommand(id) {
+  const host = globalThis;
+  const command = host.app?.extensionManager?.command;
+  if (!command)
+    throw new Error(`command manager unavailable (cannot run "${id}")`);
+  command.execute(id);
+}
+function makeRow(icon, label, description) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "cmk-hub-row";
+  const iconEl = document.createElement("i");
+  iconEl.className = `cmk-hub-icon ${icon}`;
+  const text = document.createElement("span");
+  text.className = "cmk-hub-text";
+  const labelEl = document.createElement("span");
+  labelEl.className = "cmk-hub-label";
+  labelEl.textContent = label;
+  text.append(labelEl);
+  if (description) {
+    const descEl = document.createElement("span");
+    descEl.className = "cmk-hub-desc";
+    descEl.textContent = description;
+    text.append(descEl);
+  }
+  row.append(iconEl, text);
+  return row;
+}
+function openTouchToolsHub() {
+  ensureStyleOnce(HUB_STYLE_ID, HUB_CSS);
+  let disposeBack = () => {};
+  const controller = openModalShell({
+    title: HUB_LABEL,
+    showSearch: false,
+    showFooter: false,
+    width: "min(420px, calc(100vw - 24px))",
+    onClose: () => {
+      disposeBack();
+    }
+  });
+  disposeBack = installBackGuard(() => {
+    controller.close();
+    return false;
+  });
+  function runRow(action) {
+    disposeBack({ pop: false });
+    controller.close();
+    setTimeout(() => {
+      try {
+        action();
+      } catch (e) {
+        console.error("[comfy-modal-kit] hub row action failed", e);
+        try {
+          notify({ severity: "error", summary: "Could not open that tool", detail: String(e) });
+        } catch (n) {
+          console.warn("[comfy-modal-kit] notify failed", n);
+        }
+      }
+    }, 0);
+  }
+  const list = document.createElement("div");
+  list.className = "cmk-hub-list";
+  const entries = getHubEntries();
+  for (const entry of entries) {
+    const row = makeRow(entry.icon, entry.label, entry.description);
+    row.addEventListener("click", () => runRow(entry.open));
+    list.append(row);
+  }
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "cmk-hub-empty";
+    empty.textContent = "No Touch Tools packs registered on this page yet.";
+    list.append(empty);
+  }
+  const sep = document.createElement("div");
+  sep.className = "cmk-hub-sep";
+  list.append(sep);
+  const settingsRow = makeRow("pi pi-cog", "Settings", "All Touch Tools options, in ComfyUI settings");
+  settingsRow.addEventListener("click", () => runRow(() => executeCommand(SETTINGS_COMMAND)));
+  list.append(settingsRow);
+  const note = document.createElement("div");
+  note.className = "cmk-hub-note";
+  note.textContent = "Other Touch Tools packs work directly on the canvas and its widgets — their options are in Settings.";
+  list.append(note);
+  controller.bodyEl.append(list);
+  return controller;
+}
+function fuzzyScore(query, target) {
+  if (!query)
+    return { score: 0, matches: [] };
+  if (!target)
+    return null;
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+  const matches = [];
+  let qi = 0;
+  let score = 0;
+  let consecutive = 0;
+  let prevMatchIdx = -1;
+  for (let ti = 0;ti < t.length && qi < q.length; ti++) {
+    if (t[ti] !== q[qi]) {
+      consecutive = 0;
+      continue;
+    }
+    let charScore = 1;
+    if (ti === 0) {
+      charScore += 5;
+    } else {
+      const prev = t[ti - 1];
+      const orig = target[ti];
+      if (prev === "_" || prev === "-" || prev === " " || prev === "." || prev === "/") {
+        charScore += 4;
+      } else if (prev !== undefined && prev >= "a" && prev <= "z" && orig !== undefined && orig >= "A" && orig <= "Z") {
+        charScore += 3;
+      }
+    }
+    if (ti === prevMatchIdx + 1) {
+      consecutive++;
+      charScore += consecutive * 2;
+    } else {
+      consecutive = 0;
+    }
+    score += charScore;
+    matches.push(ti);
+    prevMatchIdx = ti;
+    qi++;
+  }
+  if (qi < q.length)
+    return null;
+  score -= target.length * 0.01;
+  return { score, matches };
+}
+function fuzzyRank(query, fields, primaryWeight = 10) {
+  if (!query)
+    return { score: 0, primaryMatches: [] };
+  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length)
+    return { score: 0, primaryMatches: [] };
+  const primary = fields[0] || "";
+  const rest = fields.slice(1).filter((f) => Boolean(f));
+  let totalScore = 0;
+  const primaryMatchSet = new Set;
+  for (const token of tokens) {
+    const primaryResult = fuzzyScore(token, primary);
+    let best = primaryResult ? {
+      score: primaryResult.score * primaryWeight,
+      matches: primaryResult.matches,
+      onPrimary: true
+    } : null;
+    for (const field of rest) {
+      const r = fuzzyScore(token, field);
+      if (r && (!best || r.score > best.score)) {
+        best = { score: r.score, matches: r.matches, onPrimary: false };
+      }
+    }
+    if (!best)
+      return null;
+    totalScore += best.score;
+    if (best.onPrimary) {
+      for (const i of best.matches)
+        primaryMatchSet.add(i);
+    }
+  }
+  return {
+    score: totalScore,
+    primaryMatches: [...primaryMatchSet].sort((a, b) => a - b)
+  };
+}
+function highlightMatches(target, matchIndices) {
+  const frag = document.createDocumentFragment();
+  if (!target)
+    return frag;
+  const set = new Set(matchIndices || []);
+  if (!set.size) {
+    frag.appendChild(document.createTextNode(target));
+    return frag;
+  }
+  for (let i = 0;i < target.length; i++) {
+    const ch = target[i];
+    if (set.has(i)) {
+      const m = document.createElement("span");
+      m.className = "cmp-match";
+      m.textContent = ch;
+      frag.appendChild(m);
+    } else {
+      frag.appendChild(document.createTextNode(ch));
+    }
+  }
+  return frag;
 }
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
@@ -2489,47 +2743,77 @@ async function doCoreUpdate(state) {
 
 // src/index.ts
 var EXT_NAME2 = "comfyui-touch-manager";
-var launcher = makeLauncher({
+var entry = makeHubEntry({
   id: "touch-manager.open",
   label: "Touch Node Manager",
   icon: "pi pi-th-large",
+  description: "Install, update and remove custom nodes",
   failSummary: "Could not open Touch Node Manager",
   open: openManager
 });
-var safeOpen = launcher.commands[0]?.function ?? openManager;
+var safeOpen = entry.commands[0]?.function ?? openManager;
+function openIfNoModal() {
+  if (!document.querySelector(".cmp-dialog"))
+    safeOpen();
+}
+function collapseSidebarPanel() {
+  try {
+    const st = app2.extensionManager?.sidebarTab;
+    if (st && st.activeSidebarTabId === "touch-manager")
+      st.activeSidebarTabId = null;
+  } catch (e) {
+    console.warn(`[${EXT_NAME2}] sidebar collapse failed`, e);
+  }
+}
+function overrideToggleCommand() {
+  try {
+    const cmds = app2.extensionManager?.command?.commands;
+    const cmd = cmds?.find((c) => c.id === "Workspace.ToggleSidebarTab.touch-manager");
+    if (!cmd)
+      return false;
+    const fn = () => {
+      openIfNoModal();
+    };
+    cmd.function = fn;
+    return cmd.function === fn;
+  } catch (e) {
+    console.warn(`[${EXT_NAME2}] toggle-command override failed`, e);
+    return false;
+  }
+}
 app2.registerExtension({
   name: "comfy.touch-manager",
   settings: [
     {
       id: "TouchManager.AllowRemoteInstall",
-      name: "Touch Manager: allow install from URL on non-loopback binds",
+      name: "Allow install from URL on non-loopback binds",
+      category: ["Touch Tools", "Touch Node Manager", "Remote install"],
+      sortOrder: 100,
       tooltip: "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_INSTALL env + bind address are the real gate.",
       type: "boolean",
       defaultValue: false
     }
   ],
-  ...launcher,
+  ...entry,
+  ...installHubButton(),
   setup() {
+    registerHubEntry(entry.hubEntry);
     try {
       const em = app2.extensionManager;
       em?.registerSidebarTab?.({
         id: "touch-manager",
         type: "custom",
-        title: "Node Manager",
+        title: "Touch Node Manager",
         icon: "pi pi-th-large",
         tooltip: "Touch Node Manager",
         render: (container) => {
           container.replaceChildren();
-          if (!document.querySelector(".cmp-dialog"))
-            safeOpen();
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.textContent = "Open Node Manager";
-          btn.style.cssText = "margin:12px;min-height:44px;padding:10px 14px;font-size:15px;border-radius:8px;cursor:pointer;";
-          btn.addEventListener("click", safeOpen);
-          container.appendChild(btn);
+          openIfNoModal();
+          collapseSidebarPanel();
         }
       });
+      const overridden = overrideToggleCommand();
+      console.info(`[${EXT_NAME2}] sidebar opens the manager ${overridden ? "via command override" : "via render-collapse fallback"}`);
     } catch (e) {
       console.warn(`[${EXT_NAME2}] sidebar tab registration failed`, e);
     }
@@ -2539,6 +2823,7 @@ export {
   versionOptions,
   validateInstallUrl,
   sanitizePackName,
+  overrideToggleCommand,
   hoistPacksWithUpdates,
   formatUpdateStatus,
   formatRef,

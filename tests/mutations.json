@@ -1,5 +1,11 @@
 {
-  "command": ["bun", "run", "test", "--", "tests/js/sidebar-tab.test.js"],
+  "command": [
+    "bun",
+    "run",
+    "test",
+    "--",
+    "tests/js/sidebar-tab.test.js"
+  ],
   "reporter": "vitest-json",
   "mutations": [
     {
@@ -45,10 +51,16 @@
       "after": "    void entry.hubEntry;"
     },
     {
-      "label": "CONTROL — comment text only; MUST be MISSED, or this harness is lying",
+      "label": "override route loses the shared idempotence guard (rebuilds a modal in use)",
       "file": "src/index.ts",
-      "before": "idempotence check is load-bearing, not defensive noise.",
-      "after": "idempotence check is decorative, not load-bearing."
+      "before": "const fn = (): void => {\n      openIfNoModal();",
+      "after": "const fn = (): void => {\n      safeOpen();"
+    },
+    {
+      "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
+      "file": "src/index.ts",
+      "before": "BOTH sidebar routes must share this guard, and the sharing is the point.",
+      "after": "BOTH sidebar routes share this guard; that sharing is the whole point."
     }
   ]
 }

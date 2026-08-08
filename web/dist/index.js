@@ -2752,6 +2752,10 @@ var entry = makeHubEntry({
   open: openManager
 });
 var safeOpen = entry.commands[0]?.function ?? openManager;
+function openIfNoModal() {
+  if (!document.querySelector(".cmp-dialog"))
+    safeOpen();
+}
 function collapseSidebarPanel() {
   try {
     const st = app2.extensionManager?.sidebarTab;
@@ -2768,7 +2772,7 @@ function overrideToggleCommand() {
     if (!cmd)
       return false;
     const fn = () => {
-      safeOpen();
+      openIfNoModal();
     };
     cmd.function = fn;
     return cmd.function === fn;
@@ -2804,8 +2808,7 @@ app2.registerExtension({
         tooltip: "Touch Node Manager",
         render: (container) => {
           container.replaceChildren();
-          if (!document.querySelector(".cmp-dialog"))
-            safeOpen();
+          openIfNoModal();
           collapseSidebarPanel();
         }
       });

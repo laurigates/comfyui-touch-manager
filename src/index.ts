@@ -48,6 +48,25 @@ const entry = makeHubEntry({
 const safeOpen = entry.commands[0]?.function ?? openManager;
 
 /**
+ * Open the manager unless one is already up (the shell mounts a `.cmp-dialog`
+ * on the body).
+ *
+ * BOTH sidebar routes must share this guard, and the sharing is the point.
+ * `openManager` has no re-entrancy guard of its own — it calls `openModalShell`
+ * unconditionally, and the kit coordinator's `setActiveModal` dismisses the
+ * previous modal and mounts a fresh one, resetting tab selection, scroll and
+ * any in-flight search. Guarding only the render() path left the *preferred*
+ * route (the toggle-command override) able to tear down and rebuild a modal the
+ * user was already using: the shell backdrop covers the rail, so a tap cannot
+ * reach the toggle, but a user keybinding bound to
+ * `Workspace.ToggleSidebarTab.touch-manager` dispatches straight through
+ * (the shell stops propagation for Escape only).
+ */
+function openIfNoModal(): void {
+  if (!document.querySelector(".cmp-dialog")) safeOpen();
+}
+
+/**
  * Collapse the sidebar panel this tab would otherwise slide out.
  *
  * The rail icon is a SHORTCUT, not a panel: the manager lives in a full-screen
@@ -100,7 +119,7 @@ export function overrideToggleCommand(): boolean {
     const cmd = cmds?.find((c) => c.id === "Workspace.ToggleSidebarTab.touch-manager");
     if (!cmd) return false;
     const fn = (): void => {
-      safeOpen();
+      openIfNoModal();
     };
     cmd.function = fn;
     // Read-back identity. Vue never proxies function values (`isObject` is
@@ -191,12 +210,12 @@ app.registerExtension({
         // close the modal it had just opened, with no error anywhere.
         render: (container: HTMLElement) => {
           container.replaceChildren();
-          // Open the modal as soon as the tab is shown, unless one is already up
-          // (the shell mounts a .cmp-dialog on the body) — so re-rendering the
-          // panel never stacks a second modal. `ExtensionSlot`'s inline function
-          // ref re-fires on every patch with no identity guard, so this
-          // idempotence check is load-bearing, not defensive noise.
-          if (!document.querySelector(".cmp-dialog")) safeOpen();
+          // Open the modal as soon as the tab is shown — via the SHARED guard,
+          // so re-rendering the panel never stacks or rebuilds a modal.
+          // `ExtensionSlot`'s inline function ref re-fires on every patch with
+          // no identity guard, so this idempotence check is load-bearing, not
+          // defensive noise.
+          openIfNoModal();
           // Nothing is appended to the panel — no fallback button, no chrome.
           // The panel is not a place the user should ever end up looking at, so
           // collapse it. MUST be the last statement: the collapse unmounts this

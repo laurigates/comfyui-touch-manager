@@ -176,6 +176,28 @@ describe("comfyui-touch-manager sidebar tab", () => {
     await flush();
   });
 
+  it("the override route is idempotent: a second invocation keeps the SAME modal", async () => {
+    // Both sidebar routes share openIfNoModal(). Without that, the PREFERRED
+    // route (this one) would tear down and rebuild a modal the user is already
+    // using — resetting tab selection, scroll and in-flight search. The shell
+    // backdrop covers the rail so a tap cannot reach the toggle, but a user
+    // keybinding on Workspace.ToggleSidebarTab.touch-manager dispatches
+    // straight through (the shell stops propagation for Escape only).
+    const cmd = { id: TOGGLE_ID, function: () => {} };
+    app.extensionManager.command.commands = [cmd];
+    expect(overrideToggleCommand()).toBe(true);
+
+    cmd.function();
+    const first = document.querySelector(".cmp-dialog");
+    expect(first).not.toBeNull();
+
+    cmd.function();
+    // Node IDENTITY, not a count: a rebuilt modal also yields exactly one
+    // dialog, so toHaveLength(1) would pass against the bug.
+    expect(document.querySelector(".cmp-dialog")).toBe(first);
+    await flush();
+  });
+
   it("overrideToggleCommand() returns false on a FROZEN command without throwing", () => {
     const frozen = Object.freeze({ id: TOGGLE_ID, function: () => {} });
     app.extensionManager.command.commands = [frozen];

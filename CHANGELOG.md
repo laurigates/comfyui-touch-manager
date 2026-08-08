@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.21](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.20...comfyui-touch-manager-v0.1.21) (2026-08-08)
+
+
+### Features
+
+* **sidebar:** open the manager with no panel, and move to the Touch Tools hub ([#61](https://github.com/laurigates/comfyui-touch-manager/issues/61)) ([1795d80](https://github.com/laurigates/comfyui-touch-manager/commit/1795d8067461b6791a6048fefddac013c13beb5e))
+
 ## [0.1.20](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.19...comfyui-touch-manager-v0.1.20) (2026-08-04)
 
 

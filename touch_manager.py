@@ -11,7 +11,9 @@ route sets ``restart_required: true`` and leaves the restart to the user.
 Uses ComfyUI-bundled libraries ONLY (aiohttp, plus folder_paths / server from
 ComfyUI core) and the Python standard library (subprocess, os, asyncio, json,
 re, urllib, tomllib). Dependency installation shells out to the running
-interpreter's own pip (``python -m pip``); no third-party lib is imported.
+interpreter's own pip (``python -m pip``); no third-party lib is required —
+``tomli`` is used as a TOML reader on Python 3.10 only if it happens to be
+importable already.
 
 Route surface (all under /touch_manager/, all return {"ok": bool, ...}; errors
 are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
@@ -63,10 +65,20 @@ from json import JSONDecodeError, loads
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
-try:  # stdlib on Python 3.11+; guarded so a 3.10 host degrades to "no pyproject deps"
+# TOML reader. `tomllib` is stdlib on 3.11+; on an older host we fall back to
+# `tomli` (same API, and the module tomllib was derived from) *only if it is
+# already importable* — this adds no dependency, it just stops a 3.10 host from
+# losing every pyproject-derived feature when a perfectly good reader is
+# already installed as somebody else's transitive dep. Measured on a 3.10
+# ComfyUI: without the fallback all 18 non-git packs reported source "unknown"
+# and were silently excluded from registry update checks.
+try:  # stdlib on Python 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - depends on interpreter version
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 import folder_paths
 from aiohttp import web
@@ -835,7 +847,8 @@ def _pip_install(args: list[str], cwd: str, timeout: int = 300) -> tuple[int, st
 def _pyproject_deps(path: str) -> list[str]:
     """Return the ``[project.dependencies]`` specifiers from a pyproject.toml.
 
-    Empty list when tomllib is unavailable (Python < 3.11), the file is
+    Empty list when no TOML reader is importable (Python < 3.11 without
+    ``tomli``), the file is
     unparsable, or there is no ``[project] dependencies`` array. Only runtime
     dependencies are returned — build-system and optional-dependency groups are
     intentionally ignored.
@@ -859,8 +872,8 @@ def _pyproject_deps(path: str) -> list[str]:
 def _pyproject_project_meta(path: str) -> dict[str, str | None]:
     """Return ``{"name", "version"}`` from a pyproject.toml's ``[project]`` table.
 
-    Both None when tomllib is unavailable (Python < 3.11), the file is
-    unparsable, or the fields are absent/blank.
+    Both None when no TOML reader is importable (Python < 3.11 without
+    ``tomli``), the file is unparsable, or the fields are absent/blank.
     """
     empty: dict[str, str | None] = {"name": None, "version": None}
     if tomllib is None:

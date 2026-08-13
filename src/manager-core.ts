@@ -47,7 +47,20 @@ export interface InstalledPack {
   registry_id: string | null;
   /** The pyproject `[project.version]` currently on disk when `source` is "registry". */
   installed_version: string | null;
+  /** One-line summary read from the pack's own files; "" when it describes itself nowhere. */
+  description: string;
+  /** Which file `description` came from, so an authored summary is distinguishable
+   * from a scraped README line. "" when there is no description. */
+  description_source: DescriptionSource;
+  /** Nodes this pack registered in the RUNNING install. `null` means "unknown"
+   * (disabled pack, or a ComfyUI without node provenance) — never render it as 0. */
+  node_count: number | null;
+  /** Top-level categories those nodes register under, most-used first (max 3). */
+  node_categories: string[];
 }
+
+/** Which file a pack's description was read from ("" when none resolved). */
+export type DescriptionSource = "pyproject" | "package.json" | "readme" | "";
 
 /** One row of GET /touch_manager/updates. */
 export interface UpdateInfo {
@@ -269,6 +282,24 @@ export function formatRegistryMeta(node: RegistryNode): string {
   if (node.author) parts.push(node.author);
   parts.push(`${formatDownloads(node.downloads)} downloads`);
   if (node.latest_version) parts.push(`v${node.latest_version}`);
+  return parts.join(" · ");
+}
+
+/**
+ * One-line summary of what a pack contributes to the running install, e.g.
+ * "197 nodes · ImpactPack" or "1 node". Returns "" when the count is unknown
+ * (`null`) — a disabled pack, a frontend-only pack that registers nothing, or
+ * a ComfyUI that does not stamp node provenance. Rendering "0 nodes" for any
+ * of those would assert something the backend did not measure.
+ */
+export function formatNodeSummary(
+  pack: Pick<InstalledPack, "node_count" | "node_categories">,
+): string {
+  const count = pack.node_count;
+  if (typeof count !== "number" || count <= 0) return "";
+  const parts = [`${count} node${count === 1 ? "" : "s"}`];
+  const categories = pack.node_categories.filter((c) => c.trim().length > 0);
+  if (categories.length) parts.push(categories.join(", "));
   return parts.join(" · ");
 }
 
@@ -775,15 +806,23 @@ export interface RankedPack<T> {
 }
 
 /**
- * Fuzzy-rank a pack list against a query over [name, remote_url, author]. An
- * empty query returns every pack (no matches), sorted by name ascending. A
- * non-empty query returns only matching packs, best score first, carrying the
- * primary-field (name) match indices for highlighting. `author` is a git
- * remote owner or a registry PublisherId — matching it lets "by <author>"
- * find every pack from that author regardless of repo/pack name.
+ * Fuzzy-rank a pack list against a query over [name, remote_url, author,
+ * description]. An empty query returns every pack (no matches), sorted by name
+ * ascending. A non-empty query returns only matching packs, best score first,
+ * carrying the primary-field (name) match indices for highlighting. `author` is
+ * a git remote owner or a registry PublisherId — matching it lets "by <author>"
+ * find every pack from that author regardless of repo/pack name. `description`
+ * is the last field for the same reason it is the least trusted for display:
+ * it makes "upscale" find the packs that do upscaling even when nobody put the
+ * word in a repo name, but it must never outrank a name match.
  */
 export function filterPacks<
-  T extends { name: string; remote_url?: string | null; author?: string | null },
+  T extends {
+    name: string;
+    remote_url?: string | null;
+    author?: string | null;
+    description?: string | null;
+  },
 >(query: string, packs: readonly T[]): RankedPack<T>[] {
   const q = query.trim();
   if (!q) {
@@ -793,7 +832,12 @@ export function filterPacks<
   }
   const scored: Array<{ pack: T; score: number; primaryMatches: number[] }> = [];
   for (const pack of packs) {
-    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null, pack.author || null]);
+    const r = fuzzyRank(q, [
+      pack.name,
+      pack.remote_url ?? null,
+      pack.author || null,
+      pack.description || null,
+    ]);
     if (r) scored.push({ pack, score: r.score, primaryMatches: r.primaryMatches });
   }
   scored.sort((a, b) => b.score - a.score || a.pack.name.localeCompare(b.pack.name));

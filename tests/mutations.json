@@ -31,6 +31,30 @@
       "after": "  if (state.config) {"
     },
     {
+      "label": "description line dropped from the installed row (list is opaque names again)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "    row.appendChild(el(\"div\", \"tm-row-desc\", pack.description));",
+      "after": "    void pack.description;"
+    },
+    {
+      "label": "node summary dropped from the installed row",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  if (nodeSummary) row.appendChild(el(\"div\", \"tm-row-meta tm-row-nodes\", nodeSummary));",
+      "after": "  void nodeSummary;"
+    },
+    {
+      "label": "unknown node count renders as \"0 nodes\" instead of nothing",
+      "file": "src/manager-core.ts",
+      "before": "  if (typeof count !== \"number\" || count <= 0) return \"\";",
+      "after": "  if (typeof count !== \"number\") return \"0 nodes\";"
+    },
+    {
+      "label": "description dropped from the fuzzy fields (search by what a pack does breaks)",
+      "file": "src/manager-core.ts",
+      "before": "      pack.description || null,",
+      "after": "      null,"
+    },
+    {
       "label": "the deleted fallback button comes back (panel is no longer empty)",
       "file": "src/index.ts",
       "before": "          container.replaceChildren();",

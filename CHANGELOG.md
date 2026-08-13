@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.22](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.21...comfyui-touch-manager-v0.1.22) (2026-08-13)
+
+
+### Features
+
+* describe every installed pack, and count what it registered ([#64](https://github.com/laurigates/comfyui-touch-manager/issues/64)) ([0e9ca58](https://github.com/laurigates/comfyui-touch-manager/commit/0e9ca5883752cdf89243a4b1c614b8e9484e00b8))
+
+
+### Bug Fixes
+
+* **backend:** fall back to tomli when tomllib is unavailable ([#63](https://github.com/laurigates/comfyui-touch-manager/issues/63)) ([3df8127](https://github.com/laurigates/comfyui-touch-manager/commit/3df812723aee6e3d7d09487c1b5dca122920fb83))
+* **ui:** show a disabled Delete with its reason instead of hiding it ([#65](https://github.com/laurigates/comfyui-touch-manager/issues/65)) ([11edecc](https://github.com/laurigates/comfyui-touch-manager/commit/11edecc08dce8a65e644c0395380b22e427787b6))
+
 ## [0.1.21](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.20...comfyui-touch-manager-v0.1.21) (2026-08-08)
 
 

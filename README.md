@@ -69,11 +69,14 @@ list. Four tabs:
   New Python dependencies are installed automatically. A dirty working tree
   prompts before anything is discarded.
 - **Delete** (from an Installed row) — permanently remove a pack directory, the
-  irreversible counterpart to **Disable**. It is offered only when the server's
-  delete gate permits it (loopback by default; a non-loopback bind requires
-  `TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1`), and it asks for an explicit
-  confirmation that names the directory and points at Disable as the reversible
-  alternative.
+  irreversible counterpart to **Disable**. It asks for an explicit confirmation
+  that names the directory and points at Disable as the reversible alternative.
+  It is live only when the server's delete gate permits it — loopback by
+  default; a non-loopback bind (e.g. `--listen 0.0.0.0`) requires
+  `TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1` in the server environment. When the gate
+  refuses, the button is shown **disabled** with the reason and the env var
+  named above the list, rather than hidden: an action you cannot see is one you
+  cannot know exists, let alone enable.
 - **Install URL** — paste a GitHub/GitLab URL to clone a pack into
   `custom_nodes`. Gated by the server's bind policy (loopback by default; a
   non-loopback bind requires the `TOUCH_MANAGER_ALLOW_REMOTE_INSTALL` server

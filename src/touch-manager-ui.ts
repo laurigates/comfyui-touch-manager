@@ -74,6 +74,17 @@ import {
 const EXT_NAME = "comfyui-touch-manager";
 const SETTING_ALLOW_REMOTE = "TouchManager.AllowRemoteInstall";
 
+/**
+ * Why Delete is dead, and how to change that. Names the exact env var, because
+ * the alternative is the operator reading the source to find out — the backend
+ * refuses /delete on a non-loopback bind unless TOUCH_MANAGER_ALLOW_REMOTE_DELETE
+ * is set, and nothing in the UI used to say so.
+ */
+const DELETE_GATE_HINT =
+  "Delete is disabled: this server is not bound to loopback. Set " +
+  "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and " +
+  "restart to enable it. Disable (reversible) works either way.";
+
 // ============================================================
 // Backend access
 // ============================================================
@@ -485,6 +496,12 @@ function installedHead(state: ManagerState): HTMLElement {
   recheck.disabled = sweeping;
   head.appendChild(recheck);
   head.appendChild(el("div", "tm-row-meta tm-sweep-label", sweepLabel(state)));
+  // Say once, where it is readable on a phone, why every row's Delete is dead.
+  // Only after config has actually loaded — until then deletePermitted() is
+  // false by default, and claiming the gate refuses would be a guess.
+  if (state.config && !deletePermitted(state.config)) {
+    head.appendChild(el("div", "tm-row-meta tm-gate-note", DELETE_GATE_HINT));
+  }
   return head;
 }
 
@@ -567,11 +584,18 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
     // won't resolve it) — it can only be re-enabled or deleted for good.
     actions.appendChild(button("Enable", "tm-btn-primary", () => void doEnable(state, pack.name)));
   }
-  // Permanent removal, offered for enabled and disabled packs alike, and only
-  // when the backend's delete gate would accept it (see deletePermitted).
-  if (deletePermitted(state.config)) {
-    actions.appendChild(button("Delete", "tm-btn-danger", () => void doDelete(state, pack)));
-  }
+  // Permanent removal, offered for enabled and disabled packs alike. When the
+  // backend's delete gate would refuse it (see deletePermitted) the button is
+  // rendered DISABLED rather than omitted: hiding it silently is why the
+  // feature was invisible on a LAN-bound server — nothing on screen said the
+  // action existed, let alone how to enable it. The header carries the reason
+  // (a title attribute is unreachable on touch, and repeating it on all 96
+  // rows would be noise).
+  const canDelete = deletePermitted(state.config);
+  const deleteBtn = button("Delete", "tm-btn-danger", () => void doDelete(state, pack));
+  deleteBtn.disabled = !canDelete;
+  if (!canDelete) deleteBtn.title = DELETE_GATE_HINT;
+  actions.appendChild(deleteBtn);
 
   row.appendChild(actions);
   // Reflect any already-known (or in-progress) update info for this pack.

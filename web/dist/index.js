@@ -1546,6 +1546,7 @@ function hoistPacksWithUpdates(ranked, hasUpdate) {
 // src/touch-manager-ui.ts
 var EXT_NAME = "comfyui-touch-manager";
 var SETTING_ALLOW_REMOTE = "TouchManager.AllowRemoteInstall";
+var DELETE_GATE_HINT = "Delete is disabled: this server is not bound to loopback. Set " + "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and " + "restart to enable it. Disable (reversible) works either way.";
 
 class ManagerError extends Error {
   code;
@@ -1815,6 +1816,9 @@ function installedHead(state) {
   recheck.disabled = sweeping;
   head.appendChild(recheck);
   head.appendChild(el("div", "tm-row-meta tm-sweep-label", sweepLabel(state)));
+  if (state.config && !deletePermitted(state.config)) {
+    head.appendChild(el("div", "tm-row-meta tm-gate-note", DELETE_GATE_HINT));
+  }
   return head;
 }
 function sweepLabel(state) {
@@ -1880,9 +1884,12 @@ function installedRow(state, pack, matches) {
   } else {
     actions.appendChild(button("Enable", "tm-btn-primary", () => void doEnable(state, pack.name)));
   }
-  if (deletePermitted(state.config)) {
-    actions.appendChild(button("Delete", "tm-btn-danger", () => void doDelete(state, pack)));
-  }
+  const canDelete = deletePermitted(state.config);
+  const deleteBtn = button("Delete", "tm-btn-danger", () => void doDelete(state, pack));
+  deleteBtn.disabled = !canDelete;
+  if (!canDelete)
+    deleteBtn.title = DELETE_GATE_HINT;
+  actions.appendChild(deleteBtn);
   row.appendChild(actions);
   applyUpdateStatus(state, row, pack);
   return row;

@@ -7,6 +7,30 @@
   "reporter": "vitest-json",
   "mutations": [
     {
+      "label": "Delete goes back to being hidden when the gate refuses (invisible feature)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  actions.appendChild(deleteBtn);",
+      "after": "  if (canDelete) actions.appendChild(deleteBtn);"
+    },
+    {
+      "label": "the gate note is dropped (a dead button with no reason on screen)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "    head.appendChild(el(\"div\", \"tm-row-meta tm-gate-note\", DELETE_GATE_HINT));",
+      "after": "    void DELETE_GATE_HINT;"
+    },
+    {
+      "label": "Delete stays live when the gate refuses it (a button the backend 403s)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  deleteBtn.disabled = !canDelete;",
+      "after": "  deleteBtn.disabled = false;"
+    },
+    {
+      "label": "the gate note shows even when delete IS permitted (false alarm)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  if (state.config && !deletePermitted(state.config)) {",
+      "after": "  if (state.config) {"
+    },
+    {
       "label": "description line dropped from the installed row (list is opaque names again)",
       "file": "src/touch-manager-ui.ts",
       "before": "    row.appendChild(el(\"div\", \"tm-row-desc\", pack.description));",

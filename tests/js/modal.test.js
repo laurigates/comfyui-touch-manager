@@ -669,7 +669,7 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(labels).toEqual(["Enable", "Delete"]);
   });
 
-  it("hides Delete entirely when the backend gate refuses it", async () => {
+  it("disables Delete — visibly, with the reason — when the backend gate refuses it", async () => {
     __responses["/touch_manager/config"] = {
       ok: true,
       allow_remote_install: false,
@@ -683,9 +683,44 @@ describe("openManager (jsdom modal smoke)", () => {
     openManager();
     for (let i = 0; i < 6; i++) await flush();
 
-    const labels = [...document.querySelectorAll(".tm-row button")].map((b) => b.textContent);
-    expect(labels).not.toContain("Delete");
-    expect(labels).toContain("Disable"); // the reversible action stays
+    // Present but inert. Omitting it (the old behaviour) is why nobody could
+    // tell the feature existed on a LAN-bound server.
+    const deleteBtn = [...document.querySelectorAll(".tm-row button")].find(
+      (b) => b.textContent === "Delete",
+    );
+    expect(deleteBtn).toBeTruthy();
+    expect(deleteBtn.disabled).toBe(true);
+    expect(
+      [...document.querySelectorAll(".tm-row button")].some((b) => b.textContent === "Disable"),
+    ).toBe(true); // the reversible action stays live
+
+    // The reason is on screen, not only in a title attribute (unreachable on
+    // touch), and it names the env var that turns the gate off.
+    const note = document.querySelector(".tm-gate-note");
+    expect(note).toBeTruthy();
+    expect(note.textContent).toContain("TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1");
+
+    // And it stays inert: tapping raises no confirmation and posts nothing.
+    deleteBtn.click();
+    for (let i = 0; i < 4; i++) await flush();
+    expect(document.querySelector(".cmp-ov-backdrop")).toBeFalsy();
+    expect(__fetchCalls.some((u) => u.endsWith("/touch_manager/delete"))).toBe(false);
+  });
+
+  it("leaves Delete live and unexplained when the gate permits it", async () => {
+    // The other side of the pair: with delete_allowed true (the beforeEach
+    // config) the button must be enabled and the gate note absent — otherwise
+    // an implementation that always disables, or always warns, would pass.
+    __responses["/touch_manager/installed"] = { ok: true, packs: [gitPack("live-pack")] };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const deleteBtn = [...document.querySelectorAll(".tm-row button")].find(
+      (b) => b.textContent === "Delete",
+    );
+    expect(deleteBtn.disabled).toBe(false);
+    expect(document.querySelector(".tm-gate-note")).toBeFalsy();
   });
 
   // ----- pack descriptions + node summary in the Installed rows -----

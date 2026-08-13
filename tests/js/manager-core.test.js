@@ -10,6 +10,7 @@ import {
   formatDepsResult,
   formatDownloads,
   formatForkMeta,
+  formatNodeSummary,
   formatProgress,
   formatReconnectStatus,
   formatRef,
@@ -492,6 +493,63 @@ describe("filterPacks — fuzzy ranking over [name, remote_url, author]", () => 
 
   it("returns nothing when no field matches", () => {
     expect(filterPacks("zzzznomatch", packs)).toEqual([]);
+  });
+
+  it("matches against the description, so a search finds packs by what they do", () => {
+    const described = [
+      {
+        name: "aaa-opaque-name",
+        remote_url: null,
+        author: "",
+        description: "Tiled upscaling for large images.",
+      },
+      { name: "bbb-other", remote_url: null, author: "", description: "Audio reactive nodes." },
+    ];
+    // Two-sided: the word appears in NO name, so a hit proves the description
+    // field is searched, and the miss proves it is not matching everything.
+    expect(filterPacks("upscaling", described).map((r) => r.pack.name)).toEqual([
+      "aaa-opaque-name",
+    ]);
+    expect(filterPacks("zzzznomatch", described)).toEqual([]);
+  });
+
+  it("never lets a description hit outrank a name hit", () => {
+    const described = [
+      // "sampler" only in the description, and sorts first alphabetically —
+      // so a naive implementation would put it above the real name match.
+      { name: "aaa-first", remote_url: null, author: "", description: "Picks a sampler for you." },
+      { name: "comfyui-sampler-info", remote_url: null, author: "", description: "" },
+    ];
+    expect(filterPacks("sampler", described).map((r) => r.pack.name)).toEqual([
+      "comfyui-sampler-info",
+      "aaa-first",
+    ]);
+  });
+});
+
+describe("formatNodeSummary — what a pack contributed to the running install", () => {
+  it("renders the count with its categories", () => {
+    expect(formatNodeSummary({ node_count: 197, node_categories: ["ImpactPack"] })).toBe(
+      "197 nodes · ImpactPack",
+    );
+    expect(formatNodeSummary({ node_count: 250, node_categories: ["KJNodes", "image"] })).toBe(
+      "250 nodes · KJNodes, image",
+    );
+  });
+
+  it("singularises a one-node pack", () => {
+    expect(formatNodeSummary({ node_count: 1, node_categories: [] })).toBe("1 node");
+  });
+
+  it("renders nothing when the count is unknown, rather than claiming zero", () => {
+    // null is "the backend could not determine this" — a disabled pack, or a
+    // ComfyUI without node provenance. Both must render blank, never "0 nodes".
+    expect(formatNodeSummary({ node_count: null, node_categories: [] })).toBe("");
+    expect(formatNodeSummary({ node_count: 0, node_categories: ["x"] })).toBe("");
+  });
+
+  it("drops blank category strings instead of emitting a dangling separator", () => {
+    expect(formatNodeSummary({ node_count: 2, node_categories: ["", "  "] })).toBe("2 nodes");
   });
 });
 

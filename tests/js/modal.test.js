@@ -688,6 +688,86 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(labels).toContain("Disable"); // the reversible action stays
   });
 
+  // ----- pack descriptions + node summary in the Installed rows -----
+
+  it("renders a pack's description and node summary, and omits both when absent", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [
+        {
+          ...gitPack("described-pack"),
+          description: "Tiled upscaling for very large images.",
+          description_source: "pyproject",
+          node_count: 12,
+          node_categories: ["image", "upscaling"],
+        },
+        // The other side of the pair: nothing to say, nothing measured. Without
+        // it, an implementation that always emits the elements would pass.
+        {
+          ...gitPack("bare-pack"),
+          description: "",
+          description_source: "",
+          node_count: null,
+          node_categories: [],
+        },
+      ],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const rowFor = (name) =>
+      [...document.querySelectorAll(".tm-row")].find((r) => r.textContent.includes(name));
+
+    const described = rowFor("described-pack");
+    expect(described.querySelector(".tm-row-desc")?.textContent).toBe(
+      "Tiled upscaling for very large images.",
+    );
+    expect(described.querySelector(".tm-row-nodes")?.textContent).toBe(
+      "12 nodes · image, upscaling",
+    );
+
+    const bare = rowFor("bare-pack");
+    expect(bare.querySelector(".tm-row-desc")).toBeNull();
+    expect(bare.querySelector(".tm-row-nodes")).toBeNull();
+  });
+
+  it("filters the Installed list by description, not just by name", async () => {
+    __responses["/touch_manager/installed"] = {
+      ok: true,
+      packs: [
+        {
+          ...gitPack("obscure-name-one"),
+          description: "Nodes for interrogating booru tags from images.",
+          description_source: "pyproject",
+          node_count: null,
+          node_categories: [],
+        },
+        {
+          ...gitPack("obscure-name-two"),
+          description: "Audio reactive animation helpers.",
+          description_source: "readme",
+          node_count: null,
+          node_categories: [],
+        },
+      ],
+    };
+    __responses["/touch_manager/updates/list"] = { ok: true, packs: [] };
+    openManager();
+    for (let i = 0; i < 6; i++) await flush();
+
+    const search = document.querySelector(".cmp-search");
+    search.value = "booru";
+    search.dispatchEvent(new Event("input"));
+    await flush();
+
+    // "booru" appears in NO pack name — matching it at all proves the row's
+    // description reached the filter, and the exclusion proves it still filters.
+    const list = document.querySelector(".tm-list");
+    expect(list.textContent).toContain("obscure-name-one");
+    expect(list.textContent).not.toContain("obscure-name-two");
+  });
+
   // ----- switching to a different fork -----
 
   const forkRepo = (full_name, over = {}) => ({

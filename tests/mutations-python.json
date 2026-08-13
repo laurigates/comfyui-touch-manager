@@ -1,0 +1,89 @@
+{
+  "_comment": [
+    "Backend mutation table — run it with:",
+    "  just mutation-check comfyui-touch-manager tests/mutations-python.json",
+    "The default table (tests/mutations.json) drives the vitest suite and cannot",
+    "reach touch_manager.py at all, so the description ladder and the loaded-node",
+    "index need their own. Reporter is exit-code: pytest's non-zero exit is the",
+    "signal, so a CAUGHT line here names no individual test.",
+    "The -k selection is deliberate: it scopes the run to the assertions these",
+    "mutations are meant to test, so CAUGHT means THOSE tests have teeth rather",
+    "than some unrelated suite-wide test happening to fail. It also keeps a run",
+    "at seconds instead of the ~13 minutes the full pytest suite would take.",
+    "As in the JS table, the last entry is a CONTROL that MUST be MISSED — a run",
+    "where everything is CAUGHT is indistinguishable from a harness that lies, so",
+    "this one exits 1 on a healthy run. Read the report, not the exit code."
+  ],
+  "command": [
+    "uv",
+    "run",
+    "pytest",
+    "-q",
+    "tests/test_endpoints.py",
+    "-k",
+    "description or node_index or describe_pack or clean_description"
+  ],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "ladder reordered so the README outranks the authored pyproject description",
+      "file": "touch_manager.py",
+      "before": "    (\"pyproject\", _description_from_pyproject),\n    (\"package.json\", _description_from_package_json),\n    (\"readme\", _description_from_readme),",
+      "after": "    (\"readme\", _description_from_readme),\n    (\"pyproject\", _description_from_pyproject),\n    (\"package.json\", _description_from_package_json),"
+    },
+    {
+      "label": "length floor removed — a short label settles instead of descending",
+      "file": "touch_manager.py",
+      "before": "        if len(text) >= _DESC_MIN:",
+      "after": "        if len(text) >= 0:"
+    },
+    {
+      "label": "ComfyUI-Manager [a/Label](url) markup left raw in the description",
+      "file": "touch_manager.py",
+      "before": "    text = _MD_MANAGER_LINK_RE.sub(r\"\\1\", text)",
+      "after": "    text = text"
+    },
+    {
+      "label": "HTML tags left in the description",
+      "file": "touch_manager.py",
+      "before": "    text = _HTML_TAG_RE.sub(\" \", text)",
+      "after": "    text = text"
+    },
+    {
+      "label": "length cap removed — one verbose pack can push the list off the screen",
+      "file": "touch_manager.py",
+      "before": "    if len(text) <= _DESC_MAX:\n        return text",
+      "after": "    if True:\n        return text"
+    },
+    {
+      "label": "README structure filter dropped — headings/badges become the description",
+      "file": "touch_manager.py",
+      "before": "            structural = line.startswith(_SKIP_LINE_PREFIXES) or bool(_BADGE_LINE_RE.match(line))",
+      "after": "            structural = False"
+    },
+    {
+      "label": "description cache never invalidates (an edited pyproject is not picked up)",
+      "file": "touch_manager.py",
+      "before": "    if cached is not None and cached[0] == signature:",
+      "after": "    if cached is not None:"
+    },
+    {
+      "label": "core nodes counted against a pack (provenance check dropped)",
+      "file": "touch_manager.py",
+      "before": "        if not isinstance(relative, str) or \".\" not in relative:",
+      "after": "        if not isinstance(relative, str):"
+    },
+    {
+      "label": "an unknown node count is reported as 0 rather than None",
+      "file": "touch_manager.py",
+      "before": "        \"node_count\": nodes_info[\"count\"] if nodes_info else None,",
+      "after": "        \"node_count\": nodes_info[\"count\"] if nodes_info else 0,"
+    },
+    {
+      "label": "CONTROL — comment text only; MUST be MISSED, or this harness is lying",
+      "file": "touch_manager.py",
+      "before": "# A fixed precedence ladder over LOCAL files, never a \"pick the longest",
+      "after": "# A fixed precedence ladder over local files, rather than a \"pick the longest"
+    }
+  ]
+}

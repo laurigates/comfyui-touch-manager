@@ -481,14 +481,22 @@ def _owner_from_remote(remote: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _pyproject_publisher(path: str) -> str | None:
-    """Return ``[tool.comfy].PublisherId`` from a pyproject.toml, or None."""
+def _read_toml(path: str) -> dict[str, Any] | None:
+    """Parse a TOML file, or None when unreadable / no reader is available."""
     if tomllib is None:
         return None
     try:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pyproject_publisher(path: str) -> str | None:
+    """Return ``[tool.comfy].PublisherId`` from a pyproject.toml, or None."""
+    data = _read_toml(path)
+    if data is None:
         return None
     tool = data.get("tool")
     comfy = tool.get("comfy") if isinstance(tool, dict) else None
@@ -853,12 +861,8 @@ def _pyproject_deps(path: str) -> list[str]:
     dependencies are returned — build-system and optional-dependency groups are
     intentionally ignored.
     """
-    if tomllib is None:
-        return []
-    try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
+    data = _read_toml(path)
+    if data is None:
         return []
     project = data.get("project")
     if not isinstance(project, dict):
@@ -876,12 +880,8 @@ def _pyproject_project_meta(path: str) -> dict[str, str | None]:
     ``tomli``), the file is unparsable, or the fields are absent/blank.
     """
     empty: dict[str, str | None] = {"name": None, "version": None}
-    if tomllib is None:
-        return empty
-    try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError):
+    data = _read_toml(path)
+    if data is None:
         return empty
     project = data.get("project")
     if not isinstance(project, dict):
@@ -892,6 +892,247 @@ def _pyproject_project_meta(path: str) -> dict[str, str | None]:
         "name": name if isinstance(name, str) and name.strip() else None,
         "version": version if isinstance(version, str) and version.strip() else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Pack descriptions — "what is this pack even for?"
+#
+# A fixed precedence ladder over LOCAL files, never a "pick the longest
+# candidate" heuristic: length correlates with verbosity, not with trust, and
+# the tiers are not interchangeable. Measured against 96 installed packs,
+# longest-wins loses to the ladder on real packs — rgthree-comfy's authored
+# description is 32 chars ("Making ComfyUI more comfortable.") and would be
+# displaced by a README paragraph, while ComfyUI-FramePackWrapper's longest
+# local candidate is the README's "Mostly working, took some liberties to make
+# it run faster."
+#
+# Coverage on that same install: pyproject 84/96, README rescues 9 of the
+# remaining 12, 3 end up with no description at all (which is reported as
+# such — never fabricated).
+# ---------------------------------------------------------------------------
+
+# Rendered length cap. Long enough for a real one-paragraph summary, short
+# enough that a row stays a row on a phone.
+_DESC_MAX = 240
+
+# Below this a candidate is a title or a label, not a description ("Krea2 Turbo
+# Enhancement Nodes"), so the ladder keeps descending rather than settling.
+_DESC_MIN = 24
+
+_README_NAMES = ("README.md", "readme.md", "README.MD", "README.rst", "README.txt")
+
+# Bounded README read — the first paragraph is well inside this, and it keeps a
+# 113 KB README (bjornulf_custom_nodes, measured) off the event loop's back.
+_README_READ_CAP = 16384
+
+# ComfyUI-Manager's list markup: [a/Some Label](url) renders as "Some Label".
+# Strip the a/ marker before the generic markdown-link rule collapses the rest.
+_MD_MANAGER_LINK_RE = re.compile(r"\[a/([^\]]*)\]\([^)]*\)")
+_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_BADGE_LINE_RE = re.compile(r"^\s*(?:\[!\[|!\[|<img\b|<a\b|<p\b|<div\b|<h\d\b)", re.I)
+_SKIP_LINE_PREFIXES = ("#", ">", "- ", "* ", "+ ", "|", "```", "---", "===", "<!--")
+
+
+def _clean_description(raw: str) -> str:
+    """Normalise a candidate description to one plain-text line.
+
+    Strips Manager/markdown link markup, images, HTML tags and emphasis, then
+    collapses whitespace and caps the length at a word boundary. Returns "" for
+    anything that cleans down to nothing.
+    """
+    if not raw:
+        return ""
+    text = _HTML_COMMENT_RE.sub(" ", raw)
+    text = _MD_IMAGE_RE.sub(" ", text)
+    text = _MD_MANAGER_LINK_RE.sub(r"\1", text)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = text.replace("*", "").replace("`", "").replace("_", " ")
+    text = re.sub(r"\s+", " ", text)
+    # Removing an inline tag leaves a space before the punctuation that followed
+    # it ("bitsandbytes </a>." -> "bitsandbytes ."). Close it back up.
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
+    if len(text) <= _DESC_MAX:
+        return text
+    cut = text[:_DESC_MAX].rsplit(" ", 1)[0].rstrip(" ,;:.-")
+    return f"{cut or text[:_DESC_MAX]}…"
+
+
+def _description_from_pyproject(full: str) -> str:
+    """``[project.description]`` — authored, and mandatory to publish to the registry."""
+    data = _read_toml(os.path.join(full, "pyproject.toml"))
+    project = data.get("project") if isinstance(data, dict) else None
+    raw = project.get("description") if isinstance(project, dict) else None
+    return _clean_description(raw) if isinstance(raw, str) else ""
+
+
+def _description_from_package_json(full: str) -> str:
+    """``description`` from a pack's package.json (frontend-tooled packs)."""
+    path = os.path.join(full, "package.json")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            data = loads(fh.read())
+    except (OSError, JSONDecodeError, ValueError):
+        return ""
+    raw = data.get("description") if isinstance(data, dict) else None
+    return _clean_description(raw) if isinstance(raw, str) else ""
+
+
+def _description_from_readme(full: str) -> str:
+    """First prose paragraph of the README — the noisy last resort.
+
+    Skips headings, blockquotes, lists, tables, code fences and badge/HTML
+    banner lines, which is what a README's first screenful is mostly made of.
+    Reads a bounded prefix: the answer is in the first paragraph or nowhere,
+    and some packs ship a 113 KB README.
+    """
+    for name in _README_NAMES:
+        path = os.path.join(full, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(_README_READ_CAP)
+        except OSError:
+            return ""
+        buf: list[str] = []
+        for raw_line in _HTML_COMMENT_RE.sub("", head).splitlines():
+            line = raw_line.strip()
+            structural = line.startswith(_SKIP_LINE_PREFIXES) or bool(_BADGE_LINE_RE.match(line))
+            # A line that survives the prefix filters but cleans down to nothing
+            # is still structure, not prose — a closing </div>, a bare <br>, a
+            # link-only line. Cleaning first is what catches those, and it means
+            # the filters below only ever see real text.
+            cleaned = "" if (not line or structural) else _clean_description(line)
+            if not cleaned:
+                if buf:
+                    break  # the paragraph we were collecting just ended
+                continue
+            buf.append(cleaned)
+        return _clean_description(" ".join(buf))
+    return ""
+
+
+# The ladder, best-authored source first. Each entry is (source-tag, reader);
+# the tag ships to the frontend so a description's provenance is inspectable
+# rather than guessed at.
+_DESCRIPTION_SOURCES: tuple[tuple[str, Any], ...] = (
+    ("pyproject", _description_from_pyproject),
+    ("package.json", _description_from_package_json),
+    ("readme", _description_from_readme),
+)
+
+# path -> (signature, description, source). Invalidated by file mtime/size, so
+# an edited pyproject or a pulled README is picked up on the next listing
+# without a restart.
+_DESC_CACHE: dict[str, tuple[Any, str, str]] = {}
+
+
+def _description_signature(full: str) -> tuple[Any, ...]:
+    """Cheap change-detector over every file the ladder may read."""
+    sig: list[Any] = []
+    for name in ("pyproject.toml", "package.json", *_README_NAMES):
+        try:
+            st = os.stat(os.path.join(full, name))
+        except OSError:
+            sig.append(None)
+        else:
+            sig.append((st.st_mtime_ns, st.st_size))
+    return tuple(sig)
+
+
+def _pack_description(full: str) -> tuple[str, str]:
+    """Return ``(description, source)`` for a pack, ("", "") when none resolves.
+
+    Walks the ladder in order and takes the first candidate that survives the
+    length floor — a candidate shorter than that is a label, so descending to a
+    real sentence in a lower tier beats settling for it. A candidate is only
+    ever accepted from the pack's own files; nothing is inferred or invented.
+    """
+    signature = _description_signature(full)
+    cached = _DESC_CACHE.get(full)
+    if cached is not None and cached[0] == signature:
+        return cached[1], cached[2]
+
+    best = ("", "")
+    for source, reader in _DESCRIPTION_SOURCES:
+        try:
+            text = reader(full)
+        except Exception:  # a malformed pack must not break the whole listing
+            log.debug("description read failed for %s via %s", full, source, exc_info=True)
+            continue
+        if not text:
+            continue
+        if len(text) >= _DESC_MIN:
+            best = (text, source)
+            break
+        if not best[0]:
+            best = (text, source)  # keep the short label as a floor, keep looking
+
+    _DESC_CACHE[full] = (signature, best[0], best[1])
+    return best
+
+
+# ---------------------------------------------------------------------------
+# Loaded-node index — what a pack actually contributes to THIS install
+#
+# The complement to prose: a count and the categories it registers under. Read
+# from ComfyUI's own in-process state, so it is true of the running install
+# rather than of the repo's README. ComfyUI stamps every custom node class with
+# RELATIVE_PYTHON_MODULE ("custom_nodes.<module>") and records
+# LOADED_MODULE_DIRS[<module>] -> abspath — the same pair /object_info's
+# python_module field is built from.
+# ---------------------------------------------------------------------------
+
+_NODE_CATEGORY_CAP = 3
+
+
+def _loaded_node_index() -> dict[str, dict[str, Any]]:
+    """Map pack directory (abspath) -> {"count", "categories"}.
+
+    Empty when ComfyUI's node registry is not importable or carries no
+    provenance — the listing then simply omits the node summary rather than
+    guessing which pack a node came from.
+    """
+    try:
+        import nodes as comfy_nodes
+    except Exception:  # pragma: no cover - only absent outside a ComfyUI process
+        return {}
+
+    module_dirs = getattr(comfy_nodes, "LOADED_MODULE_DIRS", None)
+    mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", None)
+    if not isinstance(module_dirs, dict) or not isinstance(mappings, dict):
+        return {}
+
+    counts: dict[str, int] = {}
+    categories: dict[str, dict[str, int]] = {}
+    for node_cls in mappings.values():
+        relative = getattr(node_cls, "RELATIVE_PYTHON_MODULE", None)
+        if not isinstance(relative, str) or "." not in relative:
+            continue  # a core node: no custom_nodes.<module> stamp
+        module_name = relative.split(".", 1)[1]
+        directory = module_dirs.get(module_name)
+        if not isinstance(directory, str):
+            continue
+        key = os.path.normpath(directory)
+        counts[key] = counts.get(key, 0) + 1
+        category = getattr(node_cls, "CATEGORY", None)
+        if isinstance(category, str) and category.strip():
+            top = category.split("/")[0].strip()
+            bucket = categories.setdefault(key, {})
+            bucket[top] = bucket.get(top, 0) + 1
+
+    index: dict[str, dict[str, Any]] = {}
+    for key, count in counts.items():
+        ranked = sorted(categories.get(key, {}).items(), key=lambda kv: (-kv[1], kv[0]))
+        index[key] = {
+            "count": count,
+            "categories": [name for name, _ in ranked[:_NODE_CATEGORY_CAP]],
+        }
+    return index
 
 
 def _registry_source_meta(full: str) -> dict[str, str] | None:
@@ -961,8 +1202,15 @@ def _install_deps(pack_dir: str, timeout: int = 300) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _describe_pack(root: str, entry: str) -> dict[str, Any]:
-    """Build the /installed record for one directory entry."""
+def _describe_pack(
+    root: str, entry: str, node_index: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Build the /installed record for one directory entry.
+
+    ``node_index`` is the shared _loaded_node_index() result; it is built once
+    per listing and passed in so this stays O(1) per pack. Omitting it simply
+    reports no node counts.
+    """
     full = os.path.join(root, entry)
     enabled = not entry.endswith(_DISABLED_SUFFIX)
     name = entry if enabled else entry[: -len(_DISABLED_SUFFIX)]
@@ -976,6 +1224,8 @@ def _describe_pack(root: str, entry: str) -> dict[str, Any]:
         remote_url = None
         dirty = False
     registry = None if is_git else _registry_source_meta(full)
+    description, description_source = _pack_description(full)
+    nodes_info = (node_index or {}).get(os.path.normpath(full))
     return {
         "name": name,
         "path": full,
@@ -989,6 +1239,17 @@ def _describe_pack(root: str, entry: str) -> dict[str, Any]:
         "source": "git" if is_git else ("registry" if registry else "unknown"),
         "registry_id": registry["id"] if registry else None,
         "installed_version": registry["version"] if registry else None,
+        "description": description,
+        # Which file the description came from ("pyproject" / "package.json" /
+        # "readme"), or "" when the pack describes itself nowhere. Shipped so a
+        # reader can tell an authored summary from a scraped README line.
+        "description_source": description_source,
+        # Nodes this pack registered in the RUNNING install. None (not 0) when
+        # provenance is unavailable — a disabled pack, or a ComfyUI that does
+        # not stamp RELATIVE_PYTHON_MODULE — so "no data" never renders as
+        # "zero nodes".
+        "node_count": nodes_info["count"] if nodes_info else None,
+        "node_categories": nodes_info["categories"] if nodes_info else [],
     }
 
 
@@ -1010,10 +1271,11 @@ def _iter_pack_dirs(root: str) -> list[str]:
 def _collect_installed() -> list[dict[str, Any]]:
     """Enumerate every pack dir across all custom_nodes roots."""
     packs: list[dict[str, Any]] = []
+    node_index = _loaded_node_index()  # built once, shared by every pack below
     for root in _custom_nodes_roots():
         for entry in _iter_pack_dirs(root):
             try:
-                packs.append(_describe_pack(root, entry))
+                packs.append(_describe_pack(root, entry, node_index))
             except Exception:  # one bad pack must not drop the whole listing
                 log.warning("failed describing pack %s/%s", root, entry, exc_info=True)
     return packs

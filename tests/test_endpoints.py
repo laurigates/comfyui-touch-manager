@@ -1345,6 +1345,88 @@ def test_registry_source_meta_requires_name_and_version(tmp_path):
     assert pack._registry_source_meta(str(pack_dir)) == {"id": "comfyui-foo", "version": "1.0.0"}
 
 
+# ---------------------------------------------------------------------------
+# TOML reader resolution (tomllib on 3.11+, tomli fallback, graceful degradation)
+#
+# Setting sys.modules[name] = None makes `import name` raise ModuleNotFoundError,
+# which is how a 3.10 host without the fallback behaves. Each case asserts the
+# resulting BEHAVIOUR (does a pyproject actually parse?) in both directions, so a
+# reader that resolved to the wrong thing — or to nothing — cannot pass.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reload_pack():
+    """Reload touch_manager under a controlled import environment, then restore."""
+    import importlib
+    import sys
+
+    def _reload(*, tomllib_available: bool, tomli_available: bool):
+        real = importlib.import_module("tomllib")
+        saved = {k: sys.modules.get(k, _MISSING) for k in ("tomllib", "tomli")}
+        try:
+            sys.modules["tomllib"] = real if tomllib_available else None
+            # Alias the real reader in as "tomli": identical API, so the fallback
+            # is exercised for real rather than against a mock that cannot fail.
+            sys.modules["tomli"] = real if tomli_available else None
+            importlib.reload(pack)
+            return pack.tomllib
+        finally:
+            for k, v in saved.items():
+                if v is _MISSING:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    yield _reload
+    importlib.reload(pack)  # restore the module every other test shares
+
+
+_MISSING = object()
+
+
+def test_toml_reader_uses_tomllib_when_available(reload_pack, tmp_path):
+    """Positive control: with tomllib importable, nothing changes."""
+    reader = reload_pack(tomllib_available=True, tomli_available=False)
+    assert reader is not None
+    _write_pyproject(tmp_path, name="comfyui-foo", version="1.2.0")
+    assert pack._pyproject_project_meta(str(tmp_path / "pyproject.toml")) == {
+        "name": "comfyui-foo",
+        "version": "1.2.0",
+    }
+
+
+def test_toml_reader_falls_back_to_tomli_without_tomllib(reload_pack, tmp_path):
+    """The 3.10 case this fallback exists for: tomllib gone, tomli present.
+
+    Without the fallback the reader is None here, `_registry_source_meta`
+    returns None for every pack, and each one is reported as source "unknown"
+    with no version — measured on a Python 3.10 ComfyUI, 18 packs affected.
+    """
+    reader = reload_pack(tomllib_available=False, tomli_available=True)
+    assert reader is not None
+
+    _write_pyproject(tmp_path, name="comfyui-foo", version="1.2.0")
+    assert pack._pyproject_project_meta(str(tmp_path / "pyproject.toml")) == {
+        "name": "comfyui-foo",
+        "version": "1.2.0",
+    }
+    assert pack._registry_source_meta(str(tmp_path)) == {"id": "comfyui-foo", "version": "1.2.0"}
+
+
+def test_toml_reader_degrades_when_neither_is_importable(reload_pack, tmp_path):
+    """With no reader at all the module still imports and answers empty."""
+    assert reload_pack(tomllib_available=False, tomli_available=False) is None
+
+    _write_pyproject(tmp_path, name="comfyui-foo", version="1.2.0")
+    assert pack._pyproject_project_meta(str(tmp_path / "pyproject.toml")) == {
+        "name": None,
+        "version": None,
+    }
+    assert pack._registry_source_meta(str(tmp_path)) is None
+    assert pack._pyproject_deps(str(tmp_path / "pyproject.toml")) == []
+
+
 # ===========================================================================
 # GET /touch_manager/installed — author/source/registry metadata per pack
 # ===========================================================================

@@ -35,15 +35,24 @@ ComfyUI canvas — opened from a top action-bar button, the command palette
 targets, 16px inputs (no iOS zoom), momentum scroll, and a fuzzy filter on every
 list. Four tabs:
 
-- **Installed** — every pack across all `custom_nodes` roots, with its current
-  git ref (or registry version), its author, whether it has local changes, and
-  its remote. Per-pack **Update**, **Versions**, **Forks**, **Disable**, and
+- **Installed** — every pack across all `custom_nodes` roots, with **a one-line
+  description of what it is for**, its current git ref (or registry version),
+  its author, whether it has local changes, its remote, and **how many nodes it
+  registered in the running install** (with their top categories, e.g. `197
+  nodes · ImpactPack`). Descriptions are read from the pack's own files with a
+  fixed precedence — `pyproject.toml` `[project.description]`, then
+  `package.json`, then the README's first prose paragraph — and never
+  fabricated: a pack that describes itself nowhere shows no description line.
+  Across a real 96-pack install this resolves 84 from `pyproject` and 12 from
+  READMEs. Per-pack **Update**, **Versions**, **Forks**, **Disable**, and
   **Delete** actions (a disabled pack instead offers **Enable**, restoring it) —
   **Update** works for both git-backed packs (fetch + fast-forward) and packs
   installed from the Comfy Registry (re-downloads the latest published version).
   Updating a pack with **local changes** prompts before touching it: cancel, or
   **Force update** to discard the changes and proceed. Fuzzy search by name,
-  author, or remote URL. The list paints instantly; a background sweep then
+  author, remote URL, **or description** — so "upscale" finds the packs that do
+  upscaling even when none of them says so in its directory name. The list
+  paints instantly; a background sweep then
   checks each updatable pack (a few at a time) — a git fetch, or a registry
   version comparison — and fills its **available update** inline on the row.
   **Packs with an available update float to the top** once the sweep finishes.

@@ -19,6 +19,7 @@ A mobile-first ComfyUI usability pack: a frontend extension that intercepts a wi
 | `tsconfig.json` / `biome.json` / `knip.json` | Strict TS config, Biome lint/format, knip dead-code. |
 | `.github/workflows/` | `ci.yml` (tsc+build/biome/vitest/ruff/pytest/gitleaks), `publish.yml` (builds then publishes on version bump), `release-please.yml`. |
 | `tests/js/` | Vitest suite importing the `.ts` source directly. `tests/test_init.py` is the pytest backend suite. |
+| `tests/mutations-python.json` | The **backend** mutation table — `just mutation-check comfyui-touch-manager tests/mutations-python.json`. The default table drives vitest and cannot reach `touch_manager.py`, so the description ladder and node index need their own. Also carries a CONTROL that must be MISSED. |
 | `tests/mutations.json` | Drives `just mutation-check comfyui-touch-manager` from the workspace root — breaks each pinned sidebar mechanism in turn and reports which test went red. Carries a deliberate **CONTROL** mutation the suite must MISS, so the recipe exits **1** on a healthy run: read the report, not the exit code. Add a mutation whenever you add a regression assertion (`.claude/rules/modal-pack-test-tiers.md`). |
 | `justfile` | `build`, `lint`, `format`, `test`, `check` recipes — the local CI gate. |
 
@@ -37,6 +38,20 @@ A mobile-first ComfyUI usability pack: a frontend extension that intercepts a wi
 - ****Modal primitives come from `@laurigates/comfy-modal-kit`** — import them, do NOT copy `modal-shell.js`/`modal-fuzzy.js` into the pack. `bun build` inlines the imported code into `web/dist`.**
 - **Additive only.** Never clobber an existing tooltip/control; fall back to
   the native widget when there's no match. Never fabricate data.
+- **Pack descriptions come from a fixed ladder, never from "pick the longest
+  candidate".** `pyproject [project.description]` → `package.json` → the
+  README's first prose paragraph, each cleaned and held to a length floor.
+  Length correlates with verbosity, not trust, and the tiers are not
+  interchangeable: measured over 96 installed packs, longest-wins displaces
+  rgthree-comfy's authored 32-char description with a README paragraph, and
+  promotes ComfyUI-FramePackWrapper's "Mostly working, took some liberties to
+  make it run faster." A pack that describes itself nowhere reports `""` — the
+  description is never invented, and `description_source` ships alongside so a
+  reader can tell an authored summary from a scraped README line.
+- **`node_count` is `None`, never `0`, when provenance is unknown.** It is read
+  from ComfyUI's in-process `NODE_CLASS_MAPPINGS` + `LOADED_MODULE_DIRS`, so a
+  disabled pack — or a ComfyUI that does not stamp `RELATIVE_PYTHON_MODULE` —
+  has no measurement, which is not the same claim as "registers no nodes".
 - **Frontend hook is version-sensitive.** The modal opens via `widget.onPointerDown`. Keep an explicit button-widget fallback if you depend on the modal being reachable.
 - **Never hand-edit `CHANGELOG.md` or the `version` field** — release-please
   owns them (conventional commits drive the bump).

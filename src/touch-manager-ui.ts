@@ -37,6 +37,7 @@ import {
   formatCoreBehind,
   formatDepsResult,
   formatForkMeta,
+  formatNodeSummary,
   formatReconnectStatus,
   formatRef,
   formatRegistryMeta,
@@ -160,6 +161,13 @@ const CSS = `
   border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }
 .tm-row-title { font-size: 16px; font-weight: 600; word-break: break-word; }
 .tm-row-meta { font-size: 13px; opacity: 0.75; word-break: break-word; }
+/* Description: clamped to three lines so one verbose pack cannot push the rest
+   of a 96-row list off a phone screen. -webkit-line-clamp is the only widely
+   supported multi-line clamp; the max-height is the fallback where it is not. */
+.tm-row-desc { font-size: 13px; opacity: 0.9; word-break: break-word; margin: 2px 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; max-height: 4.2em; }
+.tm-row-nodes { opacity: 0.6; }
 .tm-row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .tm-btn { min-height: 44px; padding: 8px 14px; font-size: 15px; border-radius: 8px;
   border: 1px solid var(--border-color, #444); background: var(--comfy-input-bg, #2a2a2a);
@@ -501,6 +509,13 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   }
   row.appendChild(title);
 
+  // What the pack is for, read from its own files by the backend. Rendered
+  // above the version/author meta because it is the line that answers the
+  // question a list of 96 opaque directory names cannot.
+  if (pack.description) {
+    row.appendChild(el("div", "tm-row-desc", pack.description));
+  }
+
   const metaBits: string[] = [];
   if (pack.is_git) metaBits.push(formatRef(pack.ref));
   else if (pack.source === "registry") {
@@ -509,6 +524,11 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   if (pack.dirty) metaBits.push("local changes");
   if (pack.author) metaBits.push(`by ${pack.author}`);
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
+
+  // What it actually registered in THIS install — the complement to the prose,
+  // and the only description-ish line that is measured rather than authored.
+  const nodeSummary = formatNodeSummary(pack);
+  if (nodeSummary) row.appendChild(el("div", "tm-row-meta tm-row-nodes", nodeSummary));
   if (pack.remote_url) row.appendChild(el("div", "tm-row-meta", pack.remote_url));
 
   // Container the background sweep fills in place once this pack is checked.

@@ -1239,6 +1239,16 @@ function formatRegistryMeta(node) {
     parts.push(`v${node.latest_version}`);
   return parts.join(" · ");
 }
+function formatNodeSummary(pack) {
+  const count = pack.node_count;
+  if (typeof count !== "number" || count <= 0)
+    return "";
+  const parts = [`${count} node${count === 1 ? "" : "s"}`];
+  const categories = pack.node_categories.filter((c) => c.trim().length > 0);
+  if (categories.length)
+    parts.push(categories.join(", "));
+  return parts.join(" · ");
+}
 function installPermitted(config) {
   if (!config)
     return true;
@@ -1512,7 +1522,12 @@ function filterPacks(query, packs) {
   }
   const scored = [];
   for (const pack of packs) {
-    const r = fuzzyRank(q, [pack.name, pack.remote_url ?? null, pack.author || null]);
+    const r = fuzzyRank(q, [
+      pack.name,
+      pack.remote_url ?? null,
+      pack.author || null,
+      pack.description || null
+    ]);
     if (r)
       scored.push({ pack, score: r.score, primaryMatches: r.primaryMatches });
   }
@@ -1580,6 +1595,13 @@ var CSS4 = `
   border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }
 .tm-row-title { font-size: 16px; font-weight: 600; word-break: break-word; }
 .tm-row-meta { font-size: 13px; opacity: 0.75; word-break: break-word; }
+/* Description: clamped to three lines so one verbose pack cannot push the rest
+   of a 96-row list off a phone screen. -webkit-line-clamp is the only widely
+   supported multi-line clamp; the max-height is the fallback where it is not. */
+.tm-row-desc { font-size: 13px; opacity: 0.9; word-break: break-word; margin: 2px 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; max-height: 4.2em; }
+.tm-row-nodes { opacity: 0.6; }
 .tm-row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 .tm-btn { min-height: 44px; padding: 8px 14px; font-size: 15px; border-radius: 8px;
   border: 1px solid var(--border-color, #444); background: var(--comfy-input-bg, #2a2a2a);
@@ -1815,6 +1837,9 @@ function installedRow(state, pack, matches) {
     title.appendChild(tag);
   }
   row.appendChild(title);
+  if (pack.description) {
+    row.appendChild(el("div", "tm-row-desc", pack.description));
+  }
   const metaBits = [];
   if (pack.is_git)
     metaBits.push(formatRef(pack.ref));
@@ -1827,6 +1852,9 @@ function installedRow(state, pack, matches) {
   if (pack.author)
     metaBits.push(`by ${pack.author}`);
   row.appendChild(el("div", "tm-row-meta", metaBits.join(" · ")));
+  const nodeSummary = formatNodeSummary(pack);
+  if (nodeSummary)
+    row.appendChild(el("div", "tm-row-meta tm-row-nodes", nodeSummary));
   if (pack.remote_url)
     row.appendChild(el("div", "tm-row-meta", pack.remote_url));
   row.appendChild(el("div", "tm-update-status"));

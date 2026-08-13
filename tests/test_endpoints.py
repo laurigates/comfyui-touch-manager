@@ -1346,6 +1346,235 @@ def test_registry_source_meta_requires_name_and_version(tmp_path):
 
 
 # ===========================================================================
+# Pack descriptions — the local precedence ladder
+# ===========================================================================
+
+
+def _write_description_pyproject(path, description):
+    body = '[project]\nname = "p"\nversion = "1.0.0"\n'
+    if description is not None:
+        body += f'description = "{description}"\n'
+    (path / "pyproject.toml").write_text(body)
+
+
+@pytest.fixture(autouse=True)
+def clear_description_cache():
+    """The ladder memoises per path; tests reuse tmp paths within a session."""
+    pack._DESC_CACHE.clear()
+    yield
+    pack._DESC_CACHE.clear()
+
+
+def test_clean_description_strips_manager_and_markdown_markup():
+    # ComfyUI-Manager's [a/Label](url) form, as shipped by real packs
+    # (comfyui-depthanythingv2, comfyui-mmaudio, ComfyUI-segment-anything-2).
+    assert (
+        pack._clean_description(
+            "Nodes to use [a/DepthAnythingV2](https://depth-anything-v2.github.io/) for depth."
+        )
+        == "Nodes to use DepthAnythingV2 for depth."
+    )
+    # Plain markdown links keep their label, images vanish entirely.
+    assert pack._clean_description("See [the docs](https://x) ![badge](b.svg) now") == (
+        "See the docs now"
+    )
+    # Raw HTML, as shipped by comfyui_bnb_nf4_loaders.
+    assert (
+        pack._clean_description('Loaders for <a href="https://github.com/x">bitsandbytes</a>.')
+        == "Loaders for bitsandbytes."
+    )
+    assert pack._clean_description("  multi\n  line   text ") == "multi line text"
+    assert pack._clean_description("") == ""
+
+
+def test_clean_description_caps_length_at_a_word_boundary():
+    long = "word " * 200
+    out = pack._clean_description(long)
+    assert len(out) <= pack._DESC_MAX + 1  # +1 for the ellipsis
+    assert out.endswith("…")
+    assert "wor…" not in out  # cut on a space, never mid-word
+
+
+def test_description_prefers_pyproject_over_readme(tmp_path):
+    """The authored summary wins even when the README paragraph is longer.
+
+    This is the case that refutes 'pick the longest candidate': rgthree-comfy's
+    real pyproject description is 32 characters and is still the right answer.
+    """
+    _write_description_pyproject(tmp_path, "Making ComfyUI more comfortable.")
+    (tmp_path / "README.md").write_text(
+        "# rgthree-comfy\n\nA very long README paragraph that goes on at considerable "
+        "length about installation, troubleshooting and history, none of which is the "
+        "one-line answer to what this pack is for.\n"
+    )
+    assert pack._pack_description(str(tmp_path)) == (
+        "Making ComfyUI more comfortable.",
+        "pyproject",
+    )
+
+
+def test_description_falls_through_to_readme_when_pyproject_has_none(tmp_path):
+    _write_description_pyproject(tmp_path, None)
+    (tmp_path / "README.md").write_text(
+        "# ComfyUI-VAE-Utils\n\n"
+        "[![badge](https://img.shields.io/x)](https://y)\n\n"
+        "Nodes for loading and using VAEs in ways not supported by base ComfyUI.\n\n"
+        "## Installation\n"
+    )
+    text, source = pack._pack_description(str(tmp_path))
+    assert source == "readme"
+    assert text == "Nodes for loading and using VAEs in ways not supported by base ComfyUI."
+
+
+def test_description_readme_skips_headings_badges_and_lists(tmp_path):
+    (tmp_path / "README.md").write_text(
+        "<div align='center'>\n"
+        "<img src='banner.png'>\n"
+        "</div>\n\n"
+        "# Title\n\n"
+        "> a blockquote tagline\n\n"
+        "- a bullet\n\n"
+        "The actual prose paragraph describing the pack in a full sentence.\n"
+    )
+    text, source = pack._pack_description(str(tmp_path))
+    assert source == "readme"
+    assert text == "The actual prose paragraph describing the pack in a full sentence."
+
+
+def test_description_descends_past_a_short_label(tmp_path):
+    """A label ("Krea2 Turbo Enhancement Nodes") is not a description.
+
+    Below the floor the ladder keeps descending — but the label is still kept
+    as a floor, so a pack whose lower tiers are empty is not reported blank.
+    """
+    _write_description_pyproject(tmp_path, "Krea2 Turbo Nodes")  # under _DESC_MIN
+    assert pack._pack_description(str(tmp_path)) == ("Krea2 Turbo Nodes", "pyproject")
+
+    (tmp_path / "README.md").write_text(
+        "# x\n\nEnhancement nodes for the Krea 2 Turbo model, with samplers and schedulers.\n"
+    )
+    pack._DESC_CACHE.clear()
+    text, source = pack._pack_description(str(tmp_path))
+    assert source == "readme"
+    assert text.startswith("Enhancement nodes for the Krea 2 Turbo model")
+
+
+def test_description_uses_package_json_when_pyproject_is_silent(tmp_path):
+    _write_description_pyproject(tmp_path, None)
+    (tmp_path / "package.json").write_text(
+        '{"name": "p", "description": "Touch-friendly gallery picker for image widgets."}'
+    )
+    assert pack._pack_description(str(tmp_path)) == (
+        "Touch-friendly gallery picker for image widgets.",
+        "package.json",
+    )
+
+
+def test_description_is_empty_when_no_source_describes_the_pack(tmp_path):
+    """Never fabricate one — an undescribed pack reports as undescribed."""
+    (tmp_path / "README.md").write_text("# Title\n\n## Install\n\n- step one\n")
+    assert pack._pack_description(str(tmp_path)) == ("", "")
+
+
+def test_description_survives_unreadable_and_malformed_files(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("this is not valid toml {{{")
+    (tmp_path / "package.json").write_text("{not json")
+    (tmp_path / "README.md").write_text("# t\n\nA usable sentence from the readme instead.\n")
+    assert pack._pack_description(str(tmp_path)) == (
+        "A usable sentence from the readme instead.",
+        "readme",
+    )
+
+
+def test_description_cache_is_invalidated_when_the_source_file_changes(tmp_path):
+    _write_description_pyproject(tmp_path, "The first description of this pack.")
+    assert pack._pack_description(str(tmp_path))[0] == "The first description of this pack."
+
+    _write_description_pyproject(tmp_path, "A second, entirely different description.")
+    os.utime(tmp_path / "pyproject.toml", (1_700_000_000, 1_700_000_000))
+    assert pack._pack_description(str(tmp_path))[0] == "A second, entirely different description."
+
+
+# ===========================================================================
+# Loaded-node index — what a pack contributes to the RUNNING install
+# ===========================================================================
+
+
+class _FakeNode:
+    def __init__(self, module, category):
+        self.RELATIVE_PYTHON_MODULE = module
+        self.CATEGORY = category
+
+
+def _stub_nodes_module(monkeypatch, *, mappings, module_dirs):
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setitem(
+        sys.modules,
+        "nodes",
+        SimpleNamespace(NODE_CLASS_MAPPINGS=mappings, LOADED_MODULE_DIRS=module_dirs),
+    )
+
+
+def test_loaded_node_index_counts_and_ranks_categories(monkeypatch, tmp_path):
+    pack_a = str(tmp_path / "pack-a")
+    _stub_nodes_module(
+        monkeypatch,
+        mappings={
+            "A1": _FakeNode("custom_nodes.pack-a", "ImpactPack/Detailer"),
+            "A2": _FakeNode("custom_nodes.pack-a", "ImpactPack/Detector"),
+            "A3": _FakeNode("custom_nodes.pack-a", "image"),
+            "B1": _FakeNode("custom_nodes.pack-b", "video"),
+            "Core": type("Core", (), {})(),  # a core node: no provenance stamp
+        },
+        module_dirs={"pack-a": pack_a, "pack-b": str(tmp_path / "pack-b")},
+    )
+    index = pack._loaded_node_index()
+    assert index[os.path.normpath(pack_a)] == {
+        "count": 3,
+        "categories": ["ImpactPack", "image"],  # most-used first
+    }
+    assert os.path.normpath(str(tmp_path / "pack-b")) in index
+    assert len(index) == 2  # the core node contributed no entry
+
+
+def test_loaded_node_index_is_empty_without_provenance(monkeypatch):
+    """A ComfyUI that does not stamp modules yields no counts, not wrong ones."""
+    _stub_nodes_module(monkeypatch, mappings={"A": _FakeNode("nodes", "x")}, module_dirs={})
+    assert pack._loaded_node_index() == {}
+
+
+def test_describe_pack_carries_description_and_node_summary(monkeypatch, tmp_path):
+    root = tmp_path / "custom_nodes"
+    pack_dir = root / "comfyui-foo"
+    pack_dir.mkdir(parents=True)
+    _write_description_pyproject(pack_dir, "Does a specific useful thing to latents.")
+    _stub_nodes_module(
+        monkeypatch,
+        mappings={"N": _FakeNode("custom_nodes.comfyui-foo", "latent/advanced")},
+        module_dirs={"comfyui-foo": str(pack_dir)},
+    )
+
+    record = pack._describe_pack(str(root), "comfyui-foo", pack._loaded_node_index())
+    assert record["description"] == "Does a specific useful thing to latents."
+    assert record["description_source"] == "pyproject"
+    assert record["node_count"] == 1
+    assert record["node_categories"] == ["latent"]
+
+
+def test_describe_pack_reports_unknown_node_count_as_none(tmp_path):
+    """No index (or a pack not in it) is 'unknown', never 'zero nodes'."""
+    root = tmp_path / "custom_nodes"
+    (root / "comfyui-bar").mkdir(parents=True)
+    record = pack._describe_pack(str(root), "comfyui-bar", {})
+    assert record["node_count"] is None
+    assert record["node_categories"] == []
+    assert record["description"] == ""
+    assert record["description_source"] == ""
+
+
+# ===========================================================================
 # GET /touch_manager/installed — author/source/registry metadata per pack
 # ===========================================================================
 

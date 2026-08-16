@@ -31,6 +31,7 @@ import {
   type CoreUpdateResult,
   commitHref,
   type DepsResult,
+  deleteGateStatusText,
   deletePermitted,
   type ForkEntry,
   type ForksResult,
@@ -87,6 +88,75 @@ const DELETE_GATE_HINT =
   "Delete is disabled: this server is not bound to loopback. Set " +
   "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and " +
   "restart to enable it. Disable (reversible) works either way.";
+
+/**
+ * Dismissal state for the delete-gate callout.
+ *
+ * A bare `dismissed` boolean would be wrong: the operator dismisses ONE
+ * refusal, not the idea of refusals. If the server is later restarted with
+ * the override on and then off again, that is a FRESH refusal and it should
+ * speak. So the dismissal is keyed on a generation counter that advances
+ * every time the observed gate state changes — dismissing pins the current
+ * generation, and any change (in either direction) moves past it.
+ *
+ * Deliberately module-scoped and in-memory: it is a per-session nag guard,
+ * and nothing in this pack or the modal kit persists UI state to disk. A
+ * page reload starts over, which is correct — the config is re-read then too.
+ */
+const gateNag = { generation: 0, lastKey: "", dismissedGeneration: -1 };
+
+/** The gate's observable state, as a comparable string. */
+function gateStateKey(config: ManagerConfig | null): string {
+  if (!config) return "unknown";
+  return `loopback=${config.is_loopback ? 1 : 0};delete=${config.delete_allowed ? 1 : 0}`;
+}
+
+/** Advance the generation when the gate state has moved since last seen. */
+function noteGateState(config: ManagerConfig | null): void {
+  const key = gateStateKey(config);
+  if (key === gateNag.lastKey) return;
+  gateNag.lastKey = key;
+  gateNag.generation += 1;
+}
+
+/** Whether the callout should speak for the gate state currently in force. */
+function gateNoteDismissed(): boolean {
+  return gateNag.dismissedGeneration === gateNag.generation;
+}
+
+/**
+ * Live delete-gate status as a DOM node, for the Settings dialog.
+ *
+ * Registered as a `SettingCustomRenderer` — `(name, setter, value, attrs) =>
+ * HTMLElement` in @comfyorg/comfyui-frontend-types — rather than as a stored
+ * boolean, because this is STATUS, not a preference: the gate is the server's
+ * env plus its bind address, and a stored value could claim delete is enabled
+ * while the backend refuses, which is worse than saying nothing. Nothing is
+ * written back; the renderer's `setter` is deliberately never called.
+ *
+ * Paints synchronously with a placeholder and fills in when /config answers,
+ * so a slow or dead backend degrades to a readable line instead of an empty
+ * settings row.
+ */
+export function deleteGateStatusElement(): HTMLElement {
+  const wrap = el("div", "tm-gate-status", "Checking the server…");
+  void (async () => {
+    try {
+      wrap.textContent = deleteGateStatusText(await apiGet<ManagerConfig>("config"));
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] delete-gate status read failed`, e);
+      wrap.textContent = deleteGateStatusText(null);
+    }
+  })();
+  return wrap;
+}
+
+/** Test seam: reset the per-session nag guard between jsdom mounts. */
+export function __resetGateNag(): void {
+  gateNag.generation = 0;
+  gateNag.lastKey = "";
+  gateNag.dismissedGeneration = -1;
+}
 
 // ============================================================
 // Backend access
@@ -214,6 +284,14 @@ export const CSS = `
 .tm-note { font-size: 13px; padding: 10px 12px; border-radius: 8px; line-height: 1.4; }
 .tm-note-warn { background: rgba(180,140,20,0.18); border: 1px solid rgba(180,140,20,0.5); }
 .tm-note-info { background: rgba(40,90,160,0.18); border: 1px solid rgba(40,90,160,0.5); }
+/* The delete-gate callout: note treatment plus a dismiss control. flex-basis
+   100% so it takes its own line inside the wrapping .tm-installed-head rather
+   than squeezing in beside the Re-check button and the sweep label. */
+.tm-gate-note { display: flex; align-items: flex-start; gap: 8px; flex-basis: 100%; }
+.tm-gate-note-text { flex: 1 1 auto; }
+.tm-gate-dismiss { flex: 0 0 auto; min-width: 44px; min-height: 44px; padding: 0;
+  font-size: 16px; line-height: 1; border: 0; border-radius: 8px;
+  background: transparent; color: inherit; cursor: pointer; }
 .tm-restart { background: rgba(180,140,20,0.22); border: 1px solid rgba(200,150,20,0.7);
   padding: 12px; border-radius: 10px; font-size: 15px; font-weight: 600; margin-bottom: 10px; }
 .tm-empty { opacity: 0.7; font-size: 14px; padding: 16px 4px; text-align: center; }
@@ -431,6 +509,8 @@ export function openManager(): void {
       console.warn(`[${EXT_NAME}] config load failed`, e);
       state.config = null;
     }
+    // A gate state that has moved since the last open un-dismisses the callout.
+    noteGateState(state.config);
     selectTab("installed");
   })();
 }
@@ -544,6 +624,31 @@ function renderInstalledList(state: ManagerState): void {
 }
 
 /**
+ * The delete-gate explanation, as the callout treatment the pack already uses
+ * for the install and switch-repo gates (`.tm-note.tm-note-warn`) rather than
+ * the 13px / 75%-opacity meta line it used to share with the sweep label.
+ * A three-sentence instruction about setting a server env var, drawn as the
+ * quietest text on screen, read as chrome.
+ *
+ * The `tm-gate-note` class is kept as the stable hook the existing gate tests
+ * select on; what changed is the treatment it carries.
+ */
+function deleteGateNote(): HTMLElement {
+  const note = el("div", "tm-note tm-note-warn tm-gate-note");
+  note.appendChild(el("div", "tm-gate-note-text", DELETE_GATE_HINT));
+  const dismiss = el("button", "tm-gate-dismiss", "✕");
+  dismiss.type = "button";
+  dismiss.title = "Dismiss until the delete gate changes";
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.addEventListener("click", () => {
+    gateNag.dismissedGeneration = gateNag.generation;
+    note.remove();
+  });
+  note.appendChild(dismiss);
+  return note;
+}
+
+/**
  * The Installed-list header: a Re-check button plus a label reflecting the
  * background sweep (checking N/M, "X updates available", or "All up to date").
  */
@@ -557,8 +662,8 @@ function installedHead(state: ManagerState): HTMLElement {
   // Say once, where it is readable on a phone, why every row's Delete is dead.
   // Only after config has actually loaded — until then deletePermitted() is
   // false by default, and claiming the gate refuses would be a guess.
-  if (state.config && !deletePermitted(state.config)) {
-    head.appendChild(el("div", "tm-row-meta tm-gate-note", DELETE_GATE_HINT));
+  if (state.config && !deletePermitted(state.config) && !gateNoteDismissed()) {
+    head.appendChild(deleteGateNote());
   }
   return head;
 }

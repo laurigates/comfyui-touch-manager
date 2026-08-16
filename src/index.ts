@@ -16,7 +16,7 @@
 // INLINED by `bun build` — not copied into this pack.
 import { installHubButton, makeHubEntry, registerHubEntry } from "@laurigates/comfy-modal-kit";
 import { app } from "/scripts/app.js";
-import { openManager } from "./touch-manager-ui";
+import { deleteGateStatusElement, openManager } from "./touch-manager-ui";
 
 const EXT_NAME = "comfyui-touch-manager";
 
@@ -162,6 +162,26 @@ app.registerExtension({
         "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_INSTALL env + bind address are the real gate.",
       type: "boolean",
       defaultValue: false,
+    },
+    {
+      // The delete gate's LIVE state, mirrored where an operator hunting for
+      // "why can't I delete anything" actually looks. The Installed-tab
+      // callout only speaks while the gate is refusing and the tab is open;
+      // someone who reads it without shell access at that moment had no way
+      // to re-find the env var name afterwards.
+      id: "TouchManager.RemoteDeleteStatus",
+      name: "Delete on non-loopback binds",
+      // DISTINCT third element, per the comment on the entry above: two
+      // settings sharing an identical FULL category array collapse into one.
+      category: ["Touch Tools", "Touch Node Manager", "Remote delete"],
+      sortOrder: 100,
+      tooltip:
+        "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_DELETE env + bind address are the real gate.",
+      // A custom renderer, NOT a stored boolean. This is status: the value is
+      // read from GET /touch_manager/config on every render, so the dialog
+      // cannot claim delete is enabled while the backend refuses.
+      type: () => deleteGateStatusElement(),
+      defaultValue: null,
     },
     // `SettingParams.id` is typed `keyof Settings`; a custom id is intentional
     // here, so cast the array at the registration boundary.

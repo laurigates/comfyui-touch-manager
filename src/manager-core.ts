@@ -354,6 +354,33 @@ export function deletePermitted(config: ManagerConfig | null): boolean {
   return config ? config.delete_allowed : false;
 }
 
+/**
+ * One line of live delete-gate status for the Settings dialog, derived from
+ * the config the backend reported — never from a stored setting, which could
+ * sit there claiming delete is enabled while the server refuses.
+ *
+ * The branches mirror `_delete_allowed()` in touch_manager.py, which is
+ * `_is_loopback(listen) or TOUCH_MANAGER_ALLOW_REMOTE_DELETE == "1"`. That
+ * makes "refused" imply "not loopback", so the refusal line can name the bind
+ * as the cause; the trailing branch exists only so a backend that ever
+ * decouples the two does not get misreported here.
+ */
+export function deleteGateStatusText(config: ManagerConfig | null): string {
+  if (!config) return "Unavailable — could not read the server's manager config.";
+  if (config.delete_allowed) {
+    return config.is_loopback
+      ? "Enabled — this server is bound to loopback."
+      : "Enabled — TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 is set in the server environment.";
+  }
+  if (!config.is_loopback) {
+    return (
+      "Refused — this server is not bound to loopback. Set " +
+      "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and restart."
+    );
+  }
+  return "Refused by the server.";
+}
+
 // ============================================================
 // Forks — upstream + sibling repos a pack can be switched to
 // ============================================================

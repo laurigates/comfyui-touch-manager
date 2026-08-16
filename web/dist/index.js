@@ -1260,6 +1260,17 @@ function rebootPermitted(config) {
 function deletePermitted(config) {
   return config ? config.delete_allowed : false;
 }
+function deleteGateStatusText(config) {
+  if (!config)
+    return "Unavailable — could not read the server's manager config.";
+  if (config.delete_allowed) {
+    return config.is_loopback ? "Enabled — this server is bound to loopback." : "Enabled — TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 is set in the server environment.";
+  }
+  if (!config.is_loopback) {
+    return "Refused — this server is not bound to loopback. Set " + "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and restart.";
+  }
+  return "Refused by the server.";
+}
 function normalizeRepoUrl(raw) {
   const trimmed = (raw ?? "").trim().toLowerCase();
   if (!trimmed)
@@ -1580,7 +1591,34 @@ function hoistPacksWithUpdates(ranked, hasUpdate) {
 var EXT_NAME = "comfyui-touch-manager";
 var SETTING_ALLOW_REMOTE = "TouchManager.AllowRemoteInstall";
 var DELETE_GATE_HINT = "Delete is disabled: this server is not bound to loopback. Set " + "TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1 in the ComfyUI server environment and " + "restart to enable it. Disable (reversible) works either way.";
-
+var gateNag = { generation: 0, lastKey: "", dismissedGeneration: -1 };
+function gateStateKey(config) {
+  if (!config)
+    return "unknown";
+  return `loopback=${config.is_loopback ? 1 : 0};delete=${config.delete_allowed ? 1 : 0}`;
+}
+function noteGateState(config) {
+  const key = gateStateKey(config);
+  if (key === gateNag.lastKey)
+    return;
+  gateNag.lastKey = key;
+  gateNag.generation += 1;
+}
+function gateNoteDismissed() {
+  return gateNag.dismissedGeneration === gateNag.generation;
+}
+function deleteGateStatusElement() {
+  const wrap = el("div", "tm-gate-status", "Checking the server…");
+  (async () => {
+    try {
+      wrap.textContent = deleteGateStatusText(await apiGet("config"));
+    } catch (e) {
+      console.warn(`[${EXT_NAME}] delete-gate status read failed`, e);
+      wrap.textContent = deleteGateStatusText(null);
+    }
+  })();
+  return wrap;
+}
 class ManagerError extends Error {
   code;
   constructor(message, code) {
@@ -1668,6 +1706,14 @@ var CSS4 = `
 .tm-note { font-size: 13px; padding: 10px 12px; border-radius: 8px; line-height: 1.4; }
 .tm-note-warn { background: rgba(180,140,20,0.18); border: 1px solid rgba(180,140,20,0.5); }
 .tm-note-info { background: rgba(40,90,160,0.18); border: 1px solid rgba(40,90,160,0.5); }
+/* The delete-gate callout: note treatment plus a dismiss control. flex-basis
+   100% so it takes its own line inside the wrapping .tm-installed-head rather
+   than squeezing in beside the Re-check button and the sweep label. */
+.tm-gate-note { display: flex; align-items: flex-start; gap: 8px; flex-basis: 100%; }
+.tm-gate-note-text { flex: 1 1 auto; }
+.tm-gate-dismiss { flex: 0 0 auto; min-width: 44px; min-height: 44px; padding: 0;
+  font-size: 16px; line-height: 1; border: 0; border-radius: 8px;
+  background: transparent; color: inherit; cursor: pointer; }
 .tm-restart { background: rgba(180,140,20,0.22); border: 1px solid rgba(200,150,20,0.7);
   padding: 12px; border-radius: 10px; font-size: 15px; font-weight: 600; margin-bottom: 10px; }
 .tm-empty { opacity: 0.7; font-size: 14px; padding: 16px 4px; text-align: center; }
@@ -1806,6 +1852,7 @@ function openManager() {
       console.warn(`[${EXT_NAME}] config load failed`, e);
       state.config = null;
     }
+    noteGateState(state.config);
     selectTab("installed");
   })();
 }
@@ -1883,6 +1930,20 @@ function renderInstalledList(state) {
   }
   section.appendChild(list);
 }
+function deleteGateNote() {
+  const note = el("div", "tm-note tm-note-warn tm-gate-note");
+  note.appendChild(el("div", "tm-gate-note-text", DELETE_GATE_HINT));
+  const dismiss = el("button", "tm-gate-dismiss", "✕");
+  dismiss.type = "button";
+  dismiss.title = "Dismiss until the delete gate changes";
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.addEventListener("click", () => {
+    gateNag.dismissedGeneration = gateNag.generation;
+    note.remove();
+  });
+  note.appendChild(dismiss);
+  return note;
+}
 function installedHead(state) {
   const head = el("div", "tm-installed-head");
   const sweeping = !!state.sweep && !state.sweep.complete;
@@ -1890,8 +1951,8 @@ function installedHead(state) {
   recheck.disabled = sweeping;
   head.appendChild(recheck);
   head.appendChild(el("div", "tm-row-meta tm-sweep-label", sweepLabel(state)));
-  if (state.config && !deletePermitted(state.config)) {
-    head.appendChild(el("div", "tm-row-meta tm-gate-note", DELETE_GATE_HINT));
+  if (state.config && !deletePermitted(state.config) && !gateNoteDismissed()) {
+    head.appendChild(deleteGateNote());
   }
   return head;
 }
@@ -2945,6 +3006,15 @@ app2.registerExtension({
       tooltip: "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_INSTALL env + bind address are the real gate.",
       type: "boolean",
       defaultValue: false
+    },
+    {
+      id: "TouchManager.RemoteDeleteStatus",
+      name: "Delete on non-loopback binds",
+      category: ["Touch Tools", "Touch Node Manager", "Remote delete"],
+      sortOrder: 100,
+      tooltip: "Informational only — the server's TOUCH_MANAGER_ALLOW_REMOTE_DELETE env + bind address are the real gate.",
+      type: () => deleteGateStatusElement(),
+      defaultValue: null
     }
   ],
   ...entry,

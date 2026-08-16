@@ -161,12 +161,25 @@ const STYLE_ID = "touch-manager-style";
 
 // Big tap targets, 16px inputs (avoid iOS zoom), momentum scroll. Scoped
 // under .tm-* so it cannot collide with the kit's .cmp-* shell styles.
-const CSS = `
-.tm-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+export const CSS = `
+/* Segmented control, not four buttons. The family (comfyui-image-browser's
+   .ib-tabs, comfyui-gallery-loader's .ip-tabs) draws tab selection as ONE
+   bordered container holding transparent segments with a tinted active one;
+   equal-weight bordered buttons are the grammar this pack uses for Update /
+   Disable / Delete, which are actions rather than a choice. The segment
+   sizing is deliberately NOT copied from those packs: they use
+   min-height 32px, below the 44px touch floor these packs hold everywhere
+   else. Container carries the border; segments must not. */
+.tm-tabs { display: flex; gap: 2px; flex-wrap: wrap; align-items: center;
+  border: 1px solid var(--border-color, #2a2a32); border-radius: 10px; padding: 2px;
+  background: var(--comfy-input-bg, #1a1a22); }
 .tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 44px; padding: 10px 12px;
-  font-size: 15px; border-radius: 8px; border: 1px solid var(--border-color, #444);
-  background: var(--comfy-input-bg, #222); color: inherit; cursor: pointer; }
-.tm-tab.tm-active { background: var(--p-primary-color, #2b6cb0); color: #fff; border-color: transparent; }
+  font-size: 15px; border-radius: 8px; border: 0;
+  background: transparent; color: inherit; opacity: 0.7; cursor: pointer;
+  font-family: inherit; }
+/* Tinted, not solid-filled: the segment reads as selected within the group
+   rather than as a primary action sitting on top of it. */
+.tm-tab.tm-active { background: rgba(43,108,176,0.32); color: inherit; opacity: 1; font-weight: 600; }
 .tm-list { display: flex; flex-direction: column; gap: 8px; -webkit-overflow-scrolling: touch; }
 .tm-row { display: flex; flex-direction: column; gap: 6px; padding: 12px;
   border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }

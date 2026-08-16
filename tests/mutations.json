@@ -103,6 +103,24 @@
       "after": "const fn = (): void => {\n      safeOpen();"
     },
     {
+      "label": "tab segments get their own border back (four buttons, not one segmented control)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  font-size: 15px; border-radius: 8px; border: 0;",
+      "after": "  font-size: 15px; border-radius: 8px; border: 1px solid var(--border-color, #444);"
+    },
+    {
+      "label": "active tab goes back to a solid primary fill instead of a tint",
+      "file": "src/touch-manager-ui.ts",
+      "before": ".tm-tab.tm-active { background: rgba(43,108,176,0.32); color: inherit; opacity: 1; font-weight: 600; }",
+      "after": ".tm-tab.tm-active { background: var(--p-primary-color, #2b6cb0); color: #fff; border-color: transparent; }"
+    },
+    {
+      "label": "tab segment height drops to the sibling packs' 32px (below the touch floor)",
+      "file": "src/touch-manager-ui.ts",
+      "before": ".tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 44px;",
+      "after": ".tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 32px;"
+    },
+    {
       "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
       "file": "src/index.ts",
       "before": "BOTH sidebar routes must share this guard, and the sharing is the point.",

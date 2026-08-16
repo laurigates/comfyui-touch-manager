@@ -221,6 +221,12 @@ export interface VersionEntry {
   version?: string;
   /** optional secondary line (e.g. "deprecated"). */
   meta?: string;
+  /**
+   * Repository this entry's label names, when the label IS a repo URL (the
+   * synthetic "install the default branch" row). Carried separately so the UI
+   * can build an href without re-parsing the label prose around it.
+   */
+  repository?: string;
 }
 
 /**
@@ -424,6 +430,65 @@ export function sameRepo(a: string | null | undefined, b: string | null | undefi
   return na !== "" && na === normalizeRepoUrl(b);
 }
 
+/**
+ * Browsable https URL for a repository, or `""` when this pack will not build
+ * one. The gate is `ALLOWED_INSTALL_HOSTS` — the same allowlist the install
+ * path uses — because every URL here arrives from the server or a third-party
+ * API, and turning an arbitrary supplied string into an outbound link is a
+ * larger promise than rendering it as text. A `""` return is the caller's cue
+ * to render today's plain text.
+ *
+ * Built on normalizeRepoUrl, so `git@github.com:Owner/Repo.git` resolves the
+ * same as `https://github.com/owner/repo`. Note that normalization lowercases:
+ * both hosts resolve owner/repo case-insensitively, but refs do NOT, which is
+ * why the ref fragment below is taken from its own argument and never from
+ * the normalized path.
+ */
+export function repoHref(raw: string | null | undefined): string {
+  const norm = normalizeRepoUrl(raw);
+  if (!norm) return "";
+  const segments = norm.split("/");
+  const host = segments[0] ?? "";
+  const path = segments.slice(1);
+  if (!ALLOWED_INSTALL_HOSTS.has(host)) return "";
+  if (path.length < 2 || path.some((s) => s === "")) return "";
+  return `https://${host}/${path.join("/")}`;
+}
+
+/**
+ * GitLab nests repository sub-pages under `/-/`; GitHub does not. Anything
+ * else never reaches here — repoHref has already refused it.
+ */
+function subPagePrefix(base: string): string {
+  return base.startsWith("https://gitlab.com/") ? "/-/" : "/";
+}
+
+/** Encode a ref for a URL path, preserving the `/` in `feat/thing`. */
+function encodeRefPath(ref: string): string {
+  return ref.split("/").map(encodeURIComponent).join("/");
+}
+
+/** Browse-a-branch/tag URL, or `""` when the repo or ref cannot be linked. */
+export function treeHref(raw: string | null | undefined, ref: string | null | undefined): string {
+  const base = repoHref(raw);
+  const name = (ref ?? "").trim();
+  if (!base || !name) return "";
+  return `${base}${subPagePrefix(base)}tree/${encodeRefPath(name)}`;
+}
+
+/**
+ * Single-commit URL, or `""` when the repo or sha cannot be linked. Takes the
+ * FULL sha: a 7-char display abbreviation resolves on both hosts today, but
+ * the caller already holds the full value and passing the truncated one throws
+ * that away for nothing.
+ */
+export function commitHref(raw: string | null | undefined, sha: string | null | undefined): string {
+  const base = repoHref(raw);
+  const value = (sha ?? "").trim();
+  if (!base || !/^[0-9a-f]{7,40}$/i.test(value)) return "";
+  return `${base}${subPagePrefix(base)}commit/${value}`;
+}
+
 /** Short `owner/repo` label for a repository URL (falls back to the raw URL). */
 export function repoLabel(url: string | null | undefined): string {
   const norm = normalizeRepoUrl(url);
@@ -538,7 +603,7 @@ export function formatReconnectStatus(
  * Hosts the backend accepts for /install. Keep in lockstep with
  * touch_manager.py: github.com / gitlab.com only.
  */
-const ALLOWED_INSTALL_HOSTS: ReadonlySet<string> = new Set(["github.com", "gitlab.com"]);
+export const ALLOWED_INSTALL_HOSTS: ReadonlySet<string> = new Set(["github.com", "gitlab.com"]);
 
 interface UrlValidationOk {
   ok: true;

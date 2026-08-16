@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.23](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.22...comfyui-touch-manager-v0.1.23) (2026-08-16)
+
+
+### Features
+
+* **ui:** link repo URLs, remotes, branch and commit ([#73](https://github.com/laurigates/comfyui-touch-manager/issues/73)) ([1ac706b](https://github.com/laurigates/comfyui-touch-manager/commit/1ac706b73882ec0ffbb2d8344944ccd0d3784ab8)), closes [#67](https://github.com/laurigates/comfyui-touch-manager/issues/67)
+* **ui:** make the delete-gate hint a dismissible callout and mirror it into Settings ([#74](https://github.com/laurigates/comfyui-touch-manager/issues/74)) ([2043a71](https://github.com/laurigates/comfyui-touch-manager/commit/2043a7161fc9c47fe3e1536d1c8c944d1ccacc22)), closes [#68](https://github.com/laurigates/comfyui-touch-manager/issues/68)
+
+
+### Bug Fixes
+
+* **ui:** draw the tab bar as the family's segmented control ([#72](https://github.com/laurigates/comfyui-touch-manager/issues/72)) ([b6403d2](https://github.com/laurigates/comfyui-touch-manager/commit/b6403d24bbca4a4ce140bf9335a759665fd63480)), closes [#69](https://github.com/laurigates/comfyui-touch-manager/issues/69)
+
+
+### Miscellaneous
+
+* **ci:** guard registry-health against closing on Pending; drop duplicate Renovate runner ([#70](https://github.com/laurigates/comfyui-touch-manager/issues/70)) ([5a6755f](https://github.com/laurigates/comfyui-touch-manager/commit/5a6755f10786afe8a29179901d0d89e01f366a69))
+
 ## [0.1.22](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.21...comfyui-touch-manager-v0.1.22) (2026-08-13)
 
 

@@ -1278,6 +1278,39 @@ function sameRepo(a, b) {
   const na = normalizeRepoUrl(a);
   return na !== "" && na === normalizeRepoUrl(b);
 }
+function repoHref(raw) {
+  const norm = normalizeRepoUrl(raw);
+  if (!norm)
+    return "";
+  const segments = norm.split("/");
+  const host = segments[0] ?? "";
+  const path = segments.slice(1);
+  if (!ALLOWED_INSTALL_HOSTS.has(host))
+    return "";
+  if (path.length < 2 || path.some((s) => s === ""))
+    return "";
+  return `https://${host}/${path.join("/")}`;
+}
+function subPagePrefix(base) {
+  return base.startsWith("https://gitlab.com/") ? "/-/" : "/";
+}
+function encodeRefPath(ref) {
+  return ref.split("/").map(encodeURIComponent).join("/");
+}
+function treeHref(raw, ref) {
+  const base = repoHref(raw);
+  const name = (ref ?? "").trim();
+  if (!base || !name)
+    return "";
+  return `${base}${subPagePrefix(base)}tree/${encodeRefPath(name)}`;
+}
+function commitHref(raw, sha) {
+  const base = repoHref(raw);
+  const value = (sha ?? "").trim();
+  if (!base || !/^[0-9a-f]{7,40}$/i.test(value))
+    return "";
+  return `${base}${subPagePrefix(base)}commit/${value}`;
+}
 function repoLabel(url) {
   const norm = normalizeRepoUrl(url);
   if (!norm)
@@ -1609,6 +1642,12 @@ var CSS4 = `
   border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }
 .tm-row-title { font-size: 16px; font-weight: 600; word-break: break-word; }
 .tm-row-meta { font-size: 13px; opacity: 0.75; word-break: break-word; }
+/* Outbound repo/branch/commit link. inline-block + min-height so the tap
+   target clears the 44px floor even when the surrounding line is 13px meta
+   text; whether it truly measures 44px on glass is a browser-tier question. */
+.tm-link { display: inline-block; min-height: 44px; padding: 11px 4px; box-sizing: border-box;
+  color: var(--p-primary-color, #6ea8fe); text-decoration: underline;
+  word-break: break-word; }
 /* Description: clamped to three lines so one verbose pack cannot push the rest
    of a 96-row list off a phone screen. -webkit-line-clamp is the only widely
    supported multi-line clamp; the max-height is the fallback where it is not. */
@@ -1657,6 +1696,28 @@ function el(tag, className, text) {
   if (text != null)
     node.textContent = text;
   return node;
+}
+function anchor(href) {
+  const a = el("a", "tm-link");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.addEventListener("click", (e) => e.stopPropagation());
+  return a;
+}
+function linkedText(text, href) {
+  if (!href)
+    return el("span", undefined, text);
+  const a = anchor(href);
+  a.textContent = text;
+  return a;
+}
+function linkedNode(content, href) {
+  if (!href)
+    return content;
+  const a = anchor(href);
+  a.appendChild(content);
+  return a;
 }
 function button(label, className, onClick) {
   const b = el("button", `tm-btn ${className}`, label);
@@ -1872,8 +1933,11 @@ function installedRow(state, pack, matches) {
   const nodeSummary = formatNodeSummary(pack);
   if (nodeSummary)
     row.appendChild(el("div", "tm-row-meta tm-row-nodes", nodeSummary));
-  if (pack.remote_url)
-    row.appendChild(el("div", "tm-row-meta", pack.remote_url));
+  if (pack.remote_url) {
+    const remote = el("div", "tm-row-meta");
+    remote.appendChild(linkedText(pack.remote_url, repoHref(pack.remote_url)));
+    row.appendChild(remote);
+  }
   row.appendChild(el("div", "tm-update-status"));
   const actions = el("div", "tm-row-actions");
   if (pack.enabled) {
@@ -2230,7 +2294,7 @@ function forkRow(state, pack, entry, matches, allowed) {
   const head = el("div", "tm-row-head");
   head.appendChild(el("span", `tm-badge tm-badge-${entry.role}`, entry.role));
   const title = el("span", "tm-row-title");
-  title.appendChild(highlightMatches(entry.repo.full_name, matches));
+  title.appendChild(linkedNode(highlightMatches(entry.repo.full_name, matches), repoHref(entry.repo.url)));
   head.appendChild(title);
   row.appendChild(head);
   row.appendChild(el("div", "tm-row-meta", formatForkMeta(entry.repo)));
@@ -2581,7 +2645,12 @@ async function openRegistryVersions(state, node) {
   const entries = mergeVersionEntries(null, versions);
   const repoOk = node.repository ? validateInstallUrl(node.repository).ok : false;
   if (repoOk) {
-    entries.unshift({ kind: "git", label: `${node.repository} (default branch)` });
+    entries.unshift({
+      kind: "git",
+      label: node.repository,
+      meta: "default branch",
+      repository: node.repository
+    });
   }
   if (entries.length === 0) {
     section.appendChild(emptyState("No installable versions found."));
@@ -2597,7 +2666,9 @@ function registryVersionRow(state, node, entry) {
   const head = el("div", "tm-row-head");
   const badge = el("span", `tm-badge tm-badge-${entry.kind}`, iconForKind(entry.kind));
   head.appendChild(badge);
-  head.appendChild(el("span", "tm-row-title", entry.label));
+  const entryTitle = el("span", "tm-row-title");
+  entryTitle.appendChild(linkedText(entry.label, repoHref(entry.repository)));
+  head.appendChild(entryTitle);
   r.appendChild(head);
   if (entry.meta)
     r.appendChild(el("div", "tm-row-meta", entry.meta));
@@ -2638,6 +2709,40 @@ async function doRegistryInstall(state, node, version) {
     state.shell.setBusy(false);
   }
 }
+function remoteLine(label, url) {
+  const line = el("div", "tm-row-meta");
+  line.appendChild(document.createTextNode(`${label}: `));
+  line.appendChild(linkedText(url, repoHref(url)));
+  return line;
+}
+function coreRefLine(info) {
+  const line = el("div", "tm-row-meta");
+  line.appendChild(document.createTextNode("Ref: "));
+  const ref = info.ref;
+  if (!ref) {
+    line.appendChild(document.createTextNode("unknown"));
+    return line;
+  }
+  const repo = info.remotes.origin || info.remotes.upstream;
+  const short = ref.sha ? ref.sha.slice(0, 7) : "";
+  const shaFragment = () => linkedText(short, commitHref(repo, ref.sha));
+  if (ref.type === "detached") {
+    line.appendChild(document.createTextNode(short ? "detached @ " : "detached"));
+    if (short)
+      line.appendChild(shaFragment());
+    return line;
+  }
+  if (ref.name) {
+    line.appendChild(linkedText(ref.name, treeHref(repo, ref.name)));
+    if (short) {
+      line.appendChild(document.createTextNode(" @ "));
+      line.appendChild(shaFragment());
+    }
+    return line;
+  }
+  line.appendChild(short ? shaFragment() : document.createTextNode(ref.type));
+  return line;
+}
 async function renderCoreTab(state) {
   const section = resetBody(state);
   section.appendChild(emptyState("Loading core repo info…"));
@@ -2658,14 +2763,14 @@ async function renderCoreTab(state) {
     return;
   }
   const row = el("div", "tm-row");
-  row.appendChild(el("div", "tm-row-meta", `Ref: ${formatRef(info.ref)}`));
+  row.appendChild(coreRefLine(info));
   row.appendChild(el("div", "tm-row-meta", formatCoreBehind(info.behind)));
   if (info.dirty)
     row.appendChild(el("div", "tm-row-meta", "Working tree has local changes."));
   if (info.remotes.origin)
-    row.appendChild(el("div", "tm-row-meta", `origin: ${info.remotes.origin}`));
+    row.appendChild(remoteLine("origin", info.remotes.origin));
   if (info.remotes.upstream)
-    row.appendChild(el("div", "tm-row-meta", `upstream: ${info.remotes.upstream}`));
+    row.appendChild(remoteLine("upstream", info.remotes.upstream));
   section.appendChild(row);
   const actions = el("div", "tm-row-actions");
   actions.appendChild(button("Update core", "tm-btn-primary", () => void doCoreUpdate(state)));

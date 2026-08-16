@@ -29,6 +29,7 @@ import {
   buildForkEntries,
   type CoreInfo,
   type CoreUpdateResult,
+  commitHref,
   type DepsResult,
   deletePermitted,
   type ForkEntry,
@@ -60,7 +61,9 @@ import {
   type RemoteSwitchResult,
   rebootPermitted,
   reconnectExpired,
+  repoHref,
   repoLabel,
+  treeHref,
   type UpdateCheckResult,
   type UpdateResult,
   type UpdatesListEntry,
@@ -185,6 +188,12 @@ export const CSS = `
   border: 1px solid var(--border-color, #444); border-radius: 10px; background: var(--comfy-menu-bg, #1e1e1e); }
 .tm-row-title { font-size: 16px; font-weight: 600; word-break: break-word; }
 .tm-row-meta { font-size: 13px; opacity: 0.75; word-break: break-word; }
+/* Outbound repo/branch/commit link. inline-block + min-height so the tap
+   target clears the 44px floor even when the surrounding line is 13px meta
+   text; whether it truly measures 44px on glass is a browser-tier question. */
+.tm-link { display: inline-block; min-height: 44px; padding: 11px 4px; box-sizing: border-box;
+  color: var(--p-primary-color, #6ea8fe); text-decoration: underline;
+  word-break: break-word; }
 /* Description: clamped to three lines so one verbose pack cannot push the rest
    of a 96-row list off a phone screen. -webkit-line-clamp is the only widely
    supported multi-line clamp; the max-height is the fallback where it is not. */
@@ -236,6 +245,42 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (className) node.className = className;
   if (text != null) node.textContent = text;
   return node;
+}
+
+/**
+ * An outbound repository link. `href` comes from repoHref/treeHref/commitHref,
+ * which return "" for anything outside the install allowlist — so an empty
+ * href is not an error, it is the deliberate "render it the way we always did"
+ * path, and this returns a plain span.
+ *
+ * `_blank` because the manager lives in a modal over a running ComfyUI:
+ * navigating that tab away mid-update would be hostile. `stopPropagation`
+ * because some rows carry their own tap handler and following a link must not
+ * also trigger the row.
+ */
+function anchor(href: string): HTMLAnchorElement {
+  const a = el("a", "tm-link");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.addEventListener("click", (e) => e.stopPropagation());
+  return a;
+}
+
+/** `text` as a link when `href` is non-empty, and as inert text otherwise. */
+function linkedText(text: string, href: string): HTMLElement {
+  if (!href) return el("span", undefined, text);
+  const a = anchor(href);
+  a.textContent = text;
+  return a;
+}
+
+/** Like linkedText, but for content already built as a node (e.g. highlights). */
+function linkedNode(content: Node, href: string): Node {
+  if (!href) return content;
+  const a = anchor(href);
+  a.appendChild(content);
+  return a;
 }
 
 function button(label: string, className: string, onClick: () => void): HTMLButtonElement {
@@ -559,7 +604,11 @@ function installedRow(state: ManagerState, pack: InstalledPack, matches: number[
   // and the only description-ish line that is measured rather than authored.
   const nodeSummary = formatNodeSummary(pack);
   if (nodeSummary) row.appendChild(el("div", "tm-row-meta tm-row-nodes", nodeSummary));
-  if (pack.remote_url) row.appendChild(el("div", "tm-row-meta", pack.remote_url));
+  if (pack.remote_url) {
+    const remote = el("div", "tm-row-meta");
+    remote.appendChild(linkedText(pack.remote_url, repoHref(pack.remote_url)));
+    row.appendChild(remote);
+  }
 
   // Container the background sweep fills in place once this pack is checked.
   row.appendChild(el("div", "tm-update-status"));
@@ -1118,7 +1167,9 @@ function forkRow(
   const head = el("div", "tm-row-head");
   head.appendChild(el("span", `tm-badge tm-badge-${entry.role}`, entry.role));
   const title = el("span", "tm-row-title");
-  title.appendChild(highlightMatches(entry.repo.full_name, matches));
+  title.appendChild(
+    linkedNode(highlightMatches(entry.repo.full_name, matches), repoHref(entry.repo.url)),
+  );
   head.appendChild(title);
   row.appendChild(head);
   row.appendChild(el("div", "tm-row-meta", formatForkMeta(entry.repo)));
@@ -1634,7 +1685,12 @@ async function openRegistryVersions(state: ManagerState, node: RegistryNode): Pr
   // git URL — this is the "git vs registry" choice the picker distinguishes.
   const repoOk = node.repository ? validateInstallUrl(node.repository).ok : false;
   if (repoOk) {
-    entries.unshift({ kind: "git", label: `${node.repository} (default branch)` });
+    entries.unshift({
+      kind: "git",
+      label: node.repository,
+      meta: "default branch",
+      repository: node.repository,
+    });
   }
 
   if (entries.length === 0) {
@@ -1656,7 +1712,9 @@ function registryVersionRow(
   const head = el("div", "tm-row-head");
   const badge = el("span", `tm-badge tm-badge-${entry.kind}`, iconForKind(entry.kind));
   head.appendChild(badge);
-  head.appendChild(el("span", "tm-row-title", entry.label));
+  const entryTitle = el("span", "tm-row-title");
+  entryTitle.appendChild(linkedText(entry.label, repoHref(entry.repository)));
+  head.appendChild(entryTitle);
   r.appendChild(head);
   if (entry.meta) r.appendChild(el("div", "tm-row-meta", entry.meta));
 
@@ -1720,6 +1778,58 @@ async function doRegistryInstall(
 // Core tab
 // ============================================================
 
+/** `<label>: <url>` with the URL linked when the host is one we will link. */
+function remoteLine(label: string, url: string): HTMLElement {
+  const line = el("div", "tm-row-meta");
+  line.appendChild(document.createTextNode(`${label}: `));
+  line.appendChild(linkedText(url, repoHref(url)));
+  return line;
+}
+
+/**
+ * The core checkout's ref line, carrying up to two link targets: the branch
+ * (→ /tree/<branch>) and the commit (→ /commit/<full sha>).
+ *
+ * Assembled from the GitRef's own fields, NOT by splitting formatRef()'s
+ * output. Two reasons, and the second is the load-bearing one: the pieces are
+ * already held separately here, and formatRef renders shortSha(), so the
+ * formatted string does not contain the full sha the commit href needs.
+ * formatRef stays the plain-text path — and the rendered text must remain
+ * character-identical to it, which `core-links.test.js` asserts against
+ * formatRef itself rather than against a second hand-written expectation.
+ */
+function coreRefLine(info: CoreInfo): HTMLElement {
+  const line = el("div", "tm-row-meta");
+  line.appendChild(document.createTextNode("Ref: "));
+  const ref = info.ref;
+  if (!ref) {
+    line.appendChild(document.createTextNode("unknown"));
+    return line;
+  }
+  // The ref is the local checkout's; origin is the repo it belongs to, with
+  // upstream as the fallback for a fork checked out without an origin.
+  const repo = info.remotes.origin || info.remotes.upstream;
+  const short = ref.sha ? ref.sha.slice(0, 7) : "";
+  const shaFragment = (): Node => linkedText(short, commitHref(repo, ref.sha));
+
+  if (ref.type === "detached") {
+    line.appendChild(document.createTextNode(short ? "detached @ " : "detached"));
+    if (short) line.appendChild(shaFragment());
+    return line;
+  }
+  if (ref.name) {
+    line.appendChild(linkedText(ref.name, treeHref(repo, ref.name)));
+    if (short) {
+      line.appendChild(document.createTextNode(" @ "));
+      line.appendChild(shaFragment());
+    }
+    return line;
+  }
+  // No branch name: formatRef falls back to the sha, then to the ref type.
+  line.appendChild(short ? shaFragment() : document.createTextNode(ref.type));
+  return line;
+}
+
 async function renderCoreTab(state: ManagerState): Promise<void> {
   const section = resetBody(state);
   section.appendChild(emptyState("Loading core repo info…"));
@@ -1749,13 +1859,11 @@ async function renderCoreTab(state: ManagerState): Promise<void> {
   }
 
   const row = el("div", "tm-row");
-  row.appendChild(el("div", "tm-row-meta", `Ref: ${formatRef(info.ref)}`));
+  row.appendChild(coreRefLine(info));
   row.appendChild(el("div", "tm-row-meta", formatCoreBehind(info.behind)));
   if (info.dirty) row.appendChild(el("div", "tm-row-meta", "Working tree has local changes."));
-  if (info.remotes.origin)
-    row.appendChild(el("div", "tm-row-meta", `origin: ${info.remotes.origin}`));
-  if (info.remotes.upstream)
-    row.appendChild(el("div", "tm-row-meta", `upstream: ${info.remotes.upstream}`));
+  if (info.remotes.origin) row.appendChild(remoteLine("origin", info.remotes.origin));
+  if (info.remotes.upstream) row.appendChild(remoteLine("upstream", info.remotes.upstream));
   section.appendChild(row);
 
   const actions = el("div", "tm-row-actions");

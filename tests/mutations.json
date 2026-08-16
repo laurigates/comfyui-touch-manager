@@ -121,6 +121,42 @@
       "after": ".tm-tab { flex: 1 1 auto; min-width: 84px; min-height: 32px;"
     },
     {
+      "label": "installed row's remote URL goes back to inert text",
+      "file": "src/touch-manager-ui.ts",
+      "before": "    remote.appendChild(linkedText(pack.remote_url, repoHref(pack.remote_url)));",
+      "after": "    remote.textContent = pack.remote_url;"
+    },
+    {
+      "label": "fork picker's repo title goes back to inert text",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  title.appendChild(\n    linkedNode(highlightMatches(entry.repo.full_name, matches), repoHref(entry.repo.url)),\n  );",
+      "after": "  title.appendChild(highlightMatches(entry.repo.full_name, matches));"
+    },
+    {
+      "label": "registry version picker's repo row loses its href (label prose again)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "    entries.unshift({\n      kind: \"git\",\n      label: node.repository,\n      meta: \"default branch\",\n      repository: node.repository,\n    });",
+      "after": "    entries.unshift({ kind: \"git\", label: `${node.repository} (default branch)` });"
+    },
+    {
+      "label": "core Ref line goes back to one unlinked formatRef string",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  row.appendChild(coreRefLine(info));",
+      "after": "  row.appendChild(el(\"div\", \"tm-row-meta\", `Ref: ${formatRef(info.ref)}`));"
+    },
+    {
+      "label": "commit href built from the SHORT sha (a link to a truncated ref)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "  const shaFragment = (): Node => linkedText(short, commitHref(repo, ref.sha));",
+      "after": "  const shaFragment = (): Node => linkedText(short, commitHref(repo, short));"
+    },
+    {
+      "label": "host allowlist dropped: any server-supplied URL becomes an outbound link",
+      "file": "src/manager-core.ts",
+      "before": "  if (!ALLOWED_INSTALL_HOSTS.has(host)) return \"\";\n  if (path.length < 2 || path.some((s) => s === \"\")) return \"\";",
+      "after": "  if (path.length < 2 || path.some((s) => s === \"\")) return \"\";"
+    },
+    {
       "label": "CONTROL \u2014 comment text only; MUST be MISSED, or this harness is lying",
       "file": "src/index.ts",
       "before": "BOTH sidebar routes must share this guard, and the sharing is the point.",

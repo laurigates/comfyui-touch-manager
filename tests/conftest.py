@@ -65,15 +65,33 @@ def _json_response(data, *, status=200):
     return _JsonResponse(data, status=status)
 
 
+class _Headers(dict):
+    """Case-insensitive header map, like aiohttp's CIMultiDictProxy."""
+
+    def __init__(self, items=None):
+        super().__init__({k.lower(): v for k, v in dict(items or {}).items()})
+
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+    def __getitem__(self, key):
+        return super().__getitem__(key.lower())
+
+    def __contains__(self, key):
+        return super().__contains__(key.lower())
+
+
 class _Request:
     """Minimal aiohttp.web.Request stand-in.
 
-    GET handlers read ``.rel_url.query``; POST handlers ``await request.json()``.
+    GET handlers read ``.rel_url.query``; POST handlers ``await request.json()``
+    and the request guard reads ``.headers`` (case-insensitive, as in aiohttp).
     """
 
-    def __init__(self, query=None, json_body=None):
+    def __init__(self, query=None, json_body=None, headers=None):
         self.rel_url = SimpleNamespace(query=dict(query or {}))
         self._json_body = json_body
+        self.headers = _Headers(headers)
 
     async def json(self):
         if self._json_body is None:

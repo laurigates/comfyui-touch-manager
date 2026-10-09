@@ -36,10 +36,19 @@ are {"ok": false, "error": <msg>, "code": <slug>} with a matching HTTP status):
   POST /touch_manager/reboot      — opt-in os.execv stub (disabled by default)
 
 Security perimeter (enforced here, surfaced in the frontend via /config):
+  - Request guard: every POST route requires the ``X-Touch-Manager: 1`` header
+    and refuses ``Sec-Fetch-Site: cross-site`` (see _same_origin_only). The
+    custom header turns the request into a non-simple CORS request, so a
+    cross-origin page cannot send it without a preflight that no ComfyUI
+    middleware approves — independent of --enable-cors-header and of the
+    ComfyUI version's own origin checks.
   - Bind gate: /install and /remote are refused on a NON-loopback bind unless
     the operator sets TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1 — both land code
     from an arbitrary allowlisted repository. /delete is gated separately
     (loopback, or TOUCH_MANAGER_ALLOW_REMOTE_DELETE=1) since it destroys data.
+    Loopback trust also requires the request to arrive under a loopback Host
+    (localhost / 127.0.0.0/8 / ::1), so a DNS-rebound page — same-origin to
+    the browser, under the attacker's hostname — is treated as remote.
   - URL allowlist: https github.com / gitlab.com only; the derived directory
     name is sanitised to [A-Za-z0-9._-] and path-traversal-guarded against the
     install root.
@@ -51,7 +60,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import io
+import ipaddress
 import logging
 import os
 import re
@@ -63,7 +74,7 @@ import urllib.request
 import zipfile
 from json import JSONDecodeError, loads
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, urlsplit
 
 # TOML reader. `tomllib` is stdlib on 3.11+; on an older host we fall back to
 # `tomli` (same API, and the module tomllib was derived from) *only if it is
@@ -304,6 +315,38 @@ def _is_loopback(listen: str) -> bool:
     return listen in _LOOPBACK
 
 
+def _host_is_loopback(request: web.Request) -> bool:
+    """True when the request arrived under a loopback Host header.
+
+    A loopback bind is only reachable from this machine, but a browser on this
+    machine can still be pointed at it under a hostile name: DNS rebinding
+    resolves ``attacker.example`` to 127.0.0.1, so the page is same-origin to
+    the browser and passes every origin check. The Host header still carries
+    the attacker's name, which is what this reads. A request with no Host at
+    all is a local non-browser client (every browser sends Host).
+    """
+    host = request.headers.get("Host")
+    if not host:
+        return True
+    try:
+        hostname = urlsplit("//" + host).hostname
+    except ValueError:
+        return False
+    if hostname is None:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _local_request(request: web.Request) -> bool:
+    """Loopback bind AND reached under a loopback Host — the trusted case."""
+    return _is_loopback(_get_listen()) and _host_is_loopback(request)
+
+
 def _remote_install_allowed() -> bool:
     """True when the operator has opted into install on a non-loopback bind."""
     return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_INSTALL") == "1"
@@ -314,13 +357,13 @@ def _remote_reboot_allowed() -> bool:
     return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT") == "1"
 
 
-def _reboot_allowed() -> bool:
-    """Reboot is allowed on a loopback bind, or with the remote opt-in.
+def _reboot_allowed(request: web.Request) -> bool:
+    """Reboot is allowed for a local request, or with the remote opt-in.
 
     Mirrors the install gate: loopback is trusted by default; a non-loopback
     bind additionally requires TOUCH_MANAGER_ALLOW_REMOTE_REBOOT=1.
     """
-    return _is_loopback(_get_listen()) or _remote_reboot_allowed()
+    return _local_request(request) or _remote_reboot_allowed()
 
 
 def _remote_delete_allowed() -> bool:
@@ -328,7 +371,7 @@ def _remote_delete_allowed() -> bool:
     return os.environ.get("TOUCH_MANAGER_ALLOW_REMOTE_DELETE") == "1"
 
 
-def _delete_allowed() -> bool:
+def _delete_allowed(request: web.Request) -> bool:
     """Permanent delete is allowed on a loopback bind, or with the remote opt-in.
 
     Deletion is the one IRREVERSIBLE operation here — ``uninstall`` merely
@@ -337,16 +380,16 @@ def _delete_allowed() -> bool:
     operator who exposed the manager to their LAN to install packs has not
     thereby consented to anyone on it wiping their custom_nodes tree.
     """
-    return _is_loopback(_get_listen()) or _remote_delete_allowed()
+    return _local_request(request) or _remote_delete_allowed()
 
 
-def _install_allowed() -> bool:
-    """True when this bind may land new code (clone / fork switch).
+def _install_allowed(request: web.Request) -> bool:
+    """True when this request may land new code (clone / fork switch).
 
-    Loopback is trusted by default; a non-loopback bind requires
-    TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1.
+    A local request (see _local_request) is trusted by default; anything else
+    requires TOUCH_MANAGER_ALLOW_REMOTE_INSTALL=1.
     """
-    return _is_loopback(_get_listen()) or _remote_install_allowed()
+    return _local_request(request) or _remote_install_allowed()
 
 
 def _sanitize_name(raw: str) -> str | None:
@@ -1740,6 +1783,45 @@ async def _body(request: web.Request) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+# The header apiPost() in the frontend sends on every POST. Any custom header
+# makes a request non-simple under CORS, so a cross-origin page has to send a
+# preflight first; ComfyUI's origin-only middleware answers that preflight
+# without any Access-Control-Allow-* header, and its --enable-cors-header
+# middleware allows only "Content-Type, Authorization". Either way the browser
+# never sends the real request.
+_MARKER_HEADER = "X-Touch-Manager"
+
+
+def _csrf_refusal(request: web.Request) -> web.Response | None:
+    """A 403 for a request a cross-origin page could have sent, else None.
+
+    Content-Type alone is not enough: aiohttp's ``request.json()`` parses a
+    ``text/plain`` body without checking the header, and a ``text/plain`` POST
+    is a CORS simple request (no preflight). ``Sec-Fetch-Site: cross-site`` is
+    refused here too, so the refusal holds when --enable-cors-header has
+    replaced ComfyUI's own origin middleware, and on cores older than its
+    Sec-Fetch-Site check.
+    """
+    if request.headers.get(_MARKER_HEADER) != "1":
+        return _err("cross-origin request refused", "csrf_rejected", 403)
+    if request.headers.get("Sec-Fetch-Site") == "cross-site":
+        return _err("cross-origin request refused", "csrf_rejected", 403)
+    return None
+
+
+def _same_origin_only(handler):
+    """Decorate a state-changing route so _csrf_refusal runs before its body."""
+
+    @functools.wraps(handler)
+    async def guarded(request: web.Request) -> web.Response:
+        refusal = _csrf_refusal(request)
+        if refusal is not None:
+            return refusal
+        return await handler(request)
+
+    return guarded
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -1748,15 +1830,16 @@ async def _body(request: web.Request) -> dict[str, Any]:
 @PromptServer.instance.routes.get("/touch_manager/config")
 async def config(request: web.Request) -> web.Response:
     """Report the bind/security gates the frontend reflects in its UI."""
-    listen = _get_listen()
     return web.json_response(
         {
             "ok": True,
             "allow_remote_install": _remote_install_allowed(),
-            "is_loopback": _is_loopback(listen),
+            # Loopback bind AND a loopback Host: a proxied or rebound request
+            # is reported as remote, matching what the gates will decide.
+            "is_loopback": _local_request(request),
             "manager_enabled": True,
-            "reboot_allowed": _reboot_allowed(),
-            "delete_allowed": _delete_allowed(),
+            "reboot_allowed": _reboot_allowed(request),
+            "delete_allowed": _delete_allowed(request),
         }
     )
 
@@ -1888,11 +1971,12 @@ async def registry_versions(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/registry/install")
+@_same_origin_only
 async def registry_install(request: web.Request) -> web.Response:
     """Download + safely extract a registry node version into custom_nodes."""
     body = await _body(request)
     # Same bind gate as git install — this fetches and writes node code too.
-    if not _install_allowed():
+    if not _install_allowed(request):
         return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
 
     node_id = _sanitize_name(str(body.get("id", "")))
@@ -1941,12 +2025,13 @@ async def registry_install(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/install")
+@_same_origin_only
 async def install(request: web.Request) -> web.Response:
     """Clone an allowlisted github/gitlab URL into the first custom_nodes root."""
     body = await _body(request)
     # Bind gate FIRST — never reach validation/clone on a non-loopback bind
     # unless the operator explicitly opted in.
-    if not _install_allowed():
+    if not _install_allowed(request):
         return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
 
     name, code = _validate_url(body.get("url"))
@@ -1986,6 +2071,7 @@ async def install(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/update")
+@_same_origin_only
 async def update(request: web.Request) -> web.Response:
     """Update one pack: git fetch+checkout for a git pack, or a fresh archive
     download for a pack installed from the Comfy Registry (which is not a git
@@ -2033,6 +2119,7 @@ async def update(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/remote")
+@_same_origin_only
 async def remote(request: web.Request) -> web.Response:
     """Switch one git pack to a different fork, in place.
 
@@ -2042,7 +2129,7 @@ async def remote(request: web.Request) -> web.Response:
     is set (which discards local changes to tracked files).
     """
     body = await _body(request)
-    if not _install_allowed():
+    if not _install_allowed(request):
         return _err("install disabled on non-loopback bind", "blocked_remote_bind", 403)
 
     name = _sanitize_name(str(body.get("name", "")))
@@ -2079,6 +2166,7 @@ async def remote(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/uninstall")
+@_same_origin_only
 async def uninstall(request: web.Request) -> web.Response:
     """Disable a pack reversibly by renaming its dir to ``<name>.disabled``."""
     body = await _body(request)
@@ -2099,6 +2187,7 @@ async def uninstall(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/enable")
+@_same_origin_only
 async def enable(request: web.Request) -> web.Response:
     """Re-enable a disabled pack by dropping the ``.disabled`` suffix.
 
@@ -2130,6 +2219,7 @@ async def enable(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/delete")
+@_same_origin_only
 async def delete(request: web.Request) -> web.Response:
     """Permanently remove a pack directory — the irreversible sibling of uninstall.
 
@@ -2139,7 +2229,7 @@ async def delete(request: web.Request) -> web.Response:
     refuses any pack path that does not resolve inside its own custom_nodes root
     — so a symlinked pack dir deletes nothing outside the tree.
     """
-    if not _delete_allowed():
+    if not _delete_allowed(request):
         return _err("delete disabled on non-loopback bind", "delete_disabled", 403)
     body = await _body(request)
     name = _sanitize_name(str(body.get("name", "")))
@@ -2171,6 +2261,7 @@ async def core(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/core/update")
+@_same_origin_only
 async def core_update(request: web.Request) -> web.Response:
     """git pull the core repo; install its deps when a dependency file changed.
 
@@ -2190,6 +2281,7 @@ async def core_update(request: web.Request) -> web.Response:
 
 
 @PromptServer.instance.routes.post("/touch_manager/reboot")
+@_same_origin_only
 async def reboot(request: web.Request) -> web.Response:
     """Restart the server via os.execv.
 
@@ -2197,7 +2289,7 @@ async def reboot(request: web.Request) -> web.Response:
     requires TOUCH_MANAGER_ALLOW_REMOTE_REBOOT=1 (see _reboot_allowed). Refuses
     with 403 otherwise.
     """
-    if not _reboot_allowed():
+    if not _reboot_allowed(request):
         return _err("reboot disabled", "reboot_disabled", 403)
     # Replace the current process image with a fresh interpreter on the same
     # argv. Tests monkeypatch os.execv so the gate can be exercised without

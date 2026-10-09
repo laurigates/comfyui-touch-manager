@@ -182,11 +182,17 @@ async function apiGet<T>(path: string): Promise<T & OkEnvelope> {
   return data;
 }
 
-/** POST a JSON body to a /touch_manager route; throw ManagerError on failure. */
+/**
+ * POST a JSON body to a /touch_manager route; throw ManagerError on failure.
+ *
+ * `X-Touch-Manager: 1` is required by the backend on every POST (see
+ * `_csrf_refusal` in touch_manager.py): a custom header forces a CORS
+ * preflight, so a cross-origin page cannot forge the request.
+ */
 async function apiPost<T>(path: string, body: Record<string, unknown>): Promise<T & OkEnvelope> {
   const res = await app.api.fetchApi(app.api.apiURL(`/touch_manager/${path}`), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Touch-Manager": "1" },
     body: JSON.stringify(body),
   });
   const data = (await res.json()) as T & OkEnvelope;

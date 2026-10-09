@@ -119,6 +119,24 @@ describe("openManager (jsdom modal smoke)", () => {
     expect(__fetchCalls.some((u) => u.includes("/touch_manager/reboot"))).toBe(true);
   });
 
+  it("sends the X-Touch-Manager marker header on every POST (backend CSRF guard)", async () => {
+    // The backend refuses any POST without `X-Touch-Manager: 1` (issue #75):
+    // a custom header forces a CORS preflight a cross-origin page cannot pass.
+    // apiPost is the single POST path (tests/test_contract.py parses every
+    // call site through it), so driving one POST route exercises it.
+    openManager();
+    await flush();
+    await flush();
+    [...document.querySelectorAll("button")].find((b) => b.textContent === "Update")?.click();
+    for (let i = 0; i < 4; i++) await flush();
+
+    const posts = __fetchBodies.filter((c) => c.method === "POST");
+    expect(posts.map((c) => c.url)).toContain("/touch_manager/update");
+    for (const post of posts) {
+      expect(post.headers["X-Touch-Manager"], post.url).toBe("1");
+    }
+  });
+
   it("stays on the Installed list after an update — refreshed in place, no result panel", async () => {
     __responses["/touch_manager/update"] = {
       ok: true,

@@ -9,7 +9,7 @@
 // Records every fetchApi(url) the code under test makes (assert on these).
 export const __fetchCalls = [];
 
-// Parallel record of {url, method, body} for each call, so a test can assert on
+// Parallel record of {url, method, body, headers} for each call, so a test can assert on
 // a POST's JSON body (e.g. the `force` flag) — kept separate from __fetchCalls
 // so its "array of URL strings" contract stays intact.
 export const __fetchBodies = [];
@@ -73,7 +73,12 @@ export const app = {
       } catch {
         reqBody = opts?.body;
       }
-      __fetchBodies.push({ url: String(url), method: opts?.method ?? "GET", body: reqBody });
+      __fetchBodies.push({
+        url: String(url),
+        method: opts?.method ?? "GET",
+        body: reqBody,
+        headers: { ...(opts?.headers ?? {}) },
+      });
       if (__fetchControl.failNext > 0) {
         __fetchControl.failNext -= 1;
         throw new Error("network down");

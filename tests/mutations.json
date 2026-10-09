@@ -198,6 +198,13 @@
       "file": "src/index.ts",
       "before": "BOTH sidebar routes must share this guard, and the sharing is the point.",
       "after": "BOTH sidebar routes share this guard; that sharing is the whole point."
+    },
+    {
+      "label": "apiPost stops sending the X-Touch-Manager header (every POST 403s on the backend guard)",
+      "file": "src/touch-manager-ui.ts",
+      "before": "    headers: { \"Content-Type\": \"application/json\", \"X-Touch-Manager\": \"1\" },",
+      "after": "    headers: { \"Content-Type\": \"application/json\" },",
+      "expect": ["marker header"]
     }
   ]
 }

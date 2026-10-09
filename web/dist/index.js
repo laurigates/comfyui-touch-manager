@@ -1637,7 +1637,7 @@ async function apiGet(path) {
 async function apiPost(path, body) {
   const res = await app.api.fetchApi(app.api.apiURL(`/touch_manager/${path}`), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Touch-Manager": "1" },
     body: JSON.stringify(body)
   });
   const data = await res.json();

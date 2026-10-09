@@ -1,0 +1,57 @@
+{
+  "_comment": [
+    "Request-guard mutation table (issue #75) — run it from the workspace root:",
+    "  just mutation-check comfyui-touch-manager tests/mutations-security.json",
+    "The command is scoped to tests/test_request_guard.py, so CAUGHT means a",
+    "guard test caught it; exit-code reporting names no individual test, which",
+    "is why the scoping is done by file rather than with 'expect'.",
+    "The last entry is a CONTROL that MUST be MISSED."
+  ],
+  "command": ["uv", "run", "pytest", "-q", "tests/test_request_guard.py"],
+  "reporter": "exit-code",
+  "mutations": [
+    {
+      "label": "the marker-header requirement is dropped (text/plain CSRF reaches /install)",
+      "file": "touch_manager.py",
+      "before": "    if request.headers.get(_MARKER_HEADER) != \"1\":\n",
+      "after": "    if False:\n"
+    },
+    {
+      "label": "Sec-Fetch-Site: cross-site is no longer refused in the pack",
+      "file": "touch_manager.py",
+      "before": "    if request.headers.get(\"Sec-Fetch-Site\") == \"cross-site\":\n",
+      "after": "    if False:\n"
+    },
+    {
+      "label": "/install loses its guard decorator",
+      "file": "touch_manager.py",
+      "before": "@PromptServer.instance.routes.post(\"/touch_manager/install\")\n@_same_origin_only\n",
+      "after": "@PromptServer.instance.routes.post(\"/touch_manager/install\")\n"
+    },
+    {
+      "label": "loopback trust ignores the Host header (DNS rebinding gets install)",
+      "file": "touch_manager.py",
+      "before": "    return _is_loopback(_get_listen()) and _host_is_loopback(request)\n",
+      "after": "    return _is_loopback(_get_listen())\n"
+    },
+    {
+      "label": "any Host containing 'localhost' is trusted (localhost.attacker.example)",
+      "file": "touch_manager.py",
+      "before": "    if hostname == \"localhost\":\n",
+      "after": "    if \"localhost\" in hostname:\n"
+    },
+    {
+      "label": "a request with no Host header loses loopback trust",
+      "file": "touch_manager.py",
+      "before": "    if not host:\n        return True\n",
+      "after": "    if not host:\n        return False\n"
+    },
+    {
+      "label": "CONTROL: docstring prose no test can see",
+      "file": "touch_manager.py",
+      "before": "    \"\"\"Decorate a state-changing route so _csrf_refusal runs before its body.\"\"\"\n",
+      "after": "    \"\"\"Wrap a state-changing route so _csrf_refusal runs before its body.\"\"\"\n",
+      "control": true
+    }
+  ]
+}

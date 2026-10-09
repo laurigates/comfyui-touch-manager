@@ -97,12 +97,18 @@ def _set_roots(*roots):
 # ---------------------------------------------------------------------------
 
 
+# What the pack's own frontend sends: the apiPost() marker header, and a Host a
+# loopback-bound server is reached under. Tests of the request guard itself
+# (tests/test_request_guard.py) build their requests explicitly instead.
+LOCAL_HEADERS = {"X-Touch-Manager": "1", "Host": "127.0.0.1:8188"}
+
+
 def _get(handler, **query):
-    return asyncio.run(handler(Request(query=query)))
+    return asyncio.run(handler(Request(query=query, headers={"Host": "127.0.0.1:8188"})))
 
 
 def _post(handler, **body):
-    return asyncio.run(handler(Request(json_body=body)))
+    return asyncio.run(handler(Request(json_body=body, headers=LOCAL_HEADERS)))
 
 
 # ===========================================================================
@@ -1992,7 +1998,7 @@ def test_delete_gate_predicate(monkeypatch, listen, remote_env, expected):
         monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", raising=False)
     else:
         monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_DELETE", remote_env)
-    assert pack._delete_allowed() is expected
+    assert pack._delete_allowed(Request(headers=LOCAL_HEADERS)) is expected
 
 
 def _deletable(monkeypatch, tmp_path, name="pack", *, contents=True):
@@ -2447,7 +2453,7 @@ def test_reboot_gate_predicate(monkeypatch, listen, remote_env, expected):
         monkeypatch.delenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", raising=False)
     else:
         monkeypatch.setenv("TOUCH_MANAGER_ALLOW_REMOTE_REBOOT", remote_env)
-    assert pack._reboot_allowed() is expected
+    assert pack._reboot_allowed(Request(headers=LOCAL_HEADERS)) is expected
 
 
 def test_reboot_allowed_on_loopback(monkeypatch):

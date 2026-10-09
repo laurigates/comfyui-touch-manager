@@ -91,6 +91,24 @@ apply" notice, with an optional one-tap restart when the server's reboot gate
 permits it. All actions drive the pack's `/touch_manager/*` backend routes,
 which use ComfyUI-bundled libraries only.
 
+## Security
+
+Install, fork switch and core update put code into the interpreter ComfyUI
+runs in, so the backend does not trust a request just because the server is
+bound to loopback:
+
+- **Every `POST /touch_manager/*` requires the header `X-Touch-Manager: 1`**
+  and is refused when the browser marks it `Sec-Fetch-Site: cross-site`. A
+  custom header forces a CORS preflight, which no ComfyUI middleware approves
+  for that header, so another website open in your browser cannot drive these
+  routes. This holds with `--enable-cors-header` too. The pack's own UI sends
+  the header; a script calling the API must add it.
+- **Loopback trust needs a loopback `Host`.** On a loopback bind, a request is
+  treated as local only when it arrives as `localhost`, `127.x.x.x` or `[::1]`.
+  A request under any other name (a DNS-rebinding page, or a reverse proxy that
+  forwards its own hostname) is treated like a non-loopback bind and needs the
+  matching `TOUCH_MANAGER_ALLOW_REMOTE_*` opt-in.
+
 ## Compatibility
 
 - ComfyUI: modern Vue frontend (`comfyui-frontend-package >= 1.40`) for the

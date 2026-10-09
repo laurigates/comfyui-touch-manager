@@ -3043,12 +3043,12 @@ app2.registerExtension({
   }
 });
 export {
-  versionOptions,
-  validateInstallUrl,
-  sanitizePackName,
-  overrideToggleCommand,
-  hoistPacksWithUpdates,
-  formatUpdateStatus,
+  filterPacks,
   formatRef,
-  filterPacks
+  formatUpdateStatus,
+  hoistPacksWithUpdates,
+  overrideToggleCommand,
+  sanitizePackName,
+  validateInstallUrl,
+  versionOptions
 };

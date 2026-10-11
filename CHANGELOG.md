@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.24](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.23...comfyui-touch-manager-v0.1.24) (2026-10-09)
+
+
+### Bug Fixes
+
+* **security:** refuse cross-origin and DNS-rebound requests on mutating routes ([#77](https://github.com/laurigates/comfyui-touch-manager/issues/77)) ([53fd97c](https://github.com/laurigates/comfyui-touch-manager/commit/53fd97c4d2eaa134c9d89dd19516950cd035dd01)), closes [#75](https://github.com/laurigates/comfyui-touch-manager/issues/75)
+
 ## [0.1.23](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.22...comfyui-touch-manager-v0.1.23) (2026-08-16)
 
 

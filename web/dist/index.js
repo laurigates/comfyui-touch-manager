@@ -70,7 +70,9 @@ function getKit() {
       modalChrome: [],
       pointerGuardInstalled: false,
       hubEntries: [],
-      hubLauncherInstalled: false
+      hubLauncherInstalled: false,
+      hubToggles: [],
+      safeViewListeners: []
     };
     g[KEY] = kit;
   }
@@ -82,6 +84,10 @@ function getKit() {
     kit.modalChrome = [];
   if (!kit.hubEntries)
     kit.hubEntries = [];
+  if (!kit.hubToggles)
+    kit.hubToggles = [];
+  if (!kit.safeViewListeners)
+    kit.safeViewListeners = [];
   return kit;
 }
 var SORT_OPTIONS = [
@@ -97,6 +103,27 @@ var SORT_OPTIONS = [
   { value: "rating:asc", label: "Lowest rating" }
 ];
 var VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
+var IMG_EXTS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
+  ".bmp",
+  ".tiff",
+  ".tif",
+  ".avif"
+]);
+var VIDEO_EXTS = new Set([
+  ".mp4",
+  ".webm",
+  ".mov",
+  ".mkv",
+  ".avi",
+  ".m4v",
+  ".mpg",
+  ".mpeg"
+]);
 function registerHubEntry(entry) {
   const list = getKit().hubEntries;
   const i = list.findIndex((e) => e.id === entry.id);
@@ -107,7 +134,13 @@ function registerHubEntry(entry) {
   }
 }
 function getHubEntries() {
-  return [...getKit().hubEntries].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+  return [...getKit().hubEntries].sort(byPriority);
+}
+function byPriority(a, b) {
+  return (b.priority ?? 0) - (a.priority ?? 0);
+}
+function getHubToggles() {
+  return [...getKit().hubToggles].sort(byPriority);
 }
 var CHROME_ATTR = "data-cmp-chrome";
 function setActiveModal(handle) {
@@ -806,6 +839,20 @@ var HUB_CSS = `
     background: #2a2a32;
     margin: 8px 4px;
 }
+.cmk-hub-state {
+    margin-left: auto;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #2a2a32;
+    color: #9a9aa4;
+}
+.cmk-hub-row[aria-checked="true"] .cmk-hub-state {
+    background: #24406b;
+    color: #9ec6ff;
+}
 .cmk-hub-empty {
     color: #9a9aa4;
     font-size: 13px;
@@ -924,6 +971,42 @@ function openTouchToolsHub() {
   for (const entry of entries) {
     const row = makeRow(entry.icon, entry.label, entry.description);
     row.addEventListener("click", () => runRow(entry.open));
+    list.append(row);
+  }
+  for (const toggle of getHubToggles()) {
+    const row = makeRow(toggle.icon, toggle.label, toggle.description);
+    row.setAttribute("role", "switch");
+    const state = document.createElement("span");
+    state.className = "cmk-hub-state";
+    row.append(state);
+    const paint = () => {
+      let on = false;
+      try {
+        on = toggle.get();
+      } catch (e) {
+        console.error(`[comfy-modal-kit] hub toggle "${toggle.id}" get failed`, e);
+      }
+      row.setAttribute("aria-checked", on ? "true" : "false");
+      state.textContent = on ? "On" : "Off";
+    };
+    paint();
+    row.addEventListener("click", () => {
+      try {
+        toggle.set(!toggle.get());
+      } catch (e) {
+        console.error(`[comfy-modal-kit] hub toggle "${toggle.id}" set failed`, e);
+        try {
+          notify({
+            severity: "error",
+            summary: `Could not change ${toggle.label}`,
+            detail: String(e)
+          });
+        } catch (n) {
+          console.warn("[comfy-modal-kit] notify failed", n);
+        }
+      }
+      paint();
+    });
     list.append(row);
   }
   if (entries.length === 0) {
@@ -1048,6 +1131,68 @@ function highlightMatches(target, matchIndices) {
   }
   return frag;
 }
+var SAFE_VIEW_DEFAULT_KEYWORDS = "nsfw";
+var SAFE_VIEW_DEFAULTS = Object.freeze({
+  enabled: true,
+  keywords: Object.freeze([SAFE_VIEW_DEFAULT_KEYWORDS]),
+  hide: false,
+  blurNames: true,
+  matchPrompt: false
+});
+var SAFE_VIEW_BLUR_CLASS = "cmk-sv-blur";
+var SAFE_VIEW_SPOILER_CLASS = "cmk-sv-spoiler";
+var SAFE_VIEW_CSS = `
+.${SAFE_VIEW_BLUR_CLASS} {
+    /* Scale past the edges: a blurred element otherwise fades toward its own
+       border and leaks a readable silhouette of the content at the rim. */
+    filter: blur(18px);
+    transform: scale(1.08);
+}
+.${SAFE_VIEW_SPOILER_CLASS} {
+    /* A SOLID BLOCK, never a text blur — blurred text stays readable at small
+       sizes, which is exactly the size a phone grid renders names at. */
+    background: #3a3a44;
+    color: transparent;
+    border-radius: 3px;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+}
+.cmk-sv-reveal {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    z-index: 2;
+    /* >=34px is the family's per-card control floor. */
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    background: rgba(20, 20, 26, 0.82);
+    color: #e8e8ea;
+    border: 1px solid #4a4a58;
+    border-radius: 8px;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.cmk-sv-reveal:hover {
+    background: rgba(40, 40, 52, 0.92);
+}
+`;
+var NATIVE_SCROLL_KEYS = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End"
+]);
 var STYLE_ID3 = "cmp-overlay-style";
 var CSS3 = `
 .cmp-ov-backdrop {

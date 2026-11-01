@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.25](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.24...comfyui-touch-manager-v0.1.25) (2026-10-23)
+
+
+### Bug Fixes
+
+* **deps:** bump @laurigates/comfy-modal-kit to ^0.14.0 and rebuild web/dist ([#82](https://github.com/laurigates/comfyui-touch-manager/issues/82)) ([fc40e7a](https://github.com/laurigates/comfyui-touch-manager/commit/fc40e7a0f84bc6cf63da6e36bdb4a4dfdf266068)), closes [#76](https://github.com/laurigates/comfyui-touch-manager/issues/76)
+
 ## [0.1.24](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.23...comfyui-touch-manager-v0.1.24) (2026-10-09)
 
 

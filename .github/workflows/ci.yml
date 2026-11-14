@@ -14,9 +14,9 @@ jobs:
     name: Lint & format (Python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v7.6.0
       - name: Set up Python
         run: uv python install 3.12
       - name: Ruff check
@@ -28,9 +28,9 @@ jobs:
     name: Lint & format (TypeScript/JSON)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Setup Biome
-        uses: biomejs/setup-biome@v2
+        uses: biomejs/setup-biome@v2.7.1
         with:
           # Pin to the schema version declared in biome.json. Bump in lockstep
           # with a config migration via `biome migrate` when upgrading.
@@ -42,9 +42,9 @@ jobs:
     name: Typecheck & build (TypeScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           # web/dist is committed and the step below diffs it against this
           # job's build, so the bundler must be the one that produced it: bun's
@@ -69,9 +69,9 @@ jobs:
     name: Tests (Python)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v7.6.0
       - name: Set up Python
         run: uv python install 3.12
       - name: Run tests
@@ -81,9 +81,9 @@ jobs:
     name: Tests (JavaScript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@v2.2.0
         with:
           bun-version-file: .bun-version
       - name: Install dependencies
@@ -95,12 +95,12 @@ jobs:
     name: Security scanning
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           # gitleaks scans <prev>^..<head>; the parent commit must be present
           # locally, so a shallow clone fails with "stderr is not empty".
           fetch-depth: 0
       - name: Gitleaks secret scan
-        uses: gitleaks/gitleaks-action@v3
+        uses: gitleaks/gitleaks-action@v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

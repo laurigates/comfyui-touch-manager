@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.26](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.25...comfyui-touch-manager-v0.1.26) (2026-11-16)
+
+
+### Bug Fixes
+
+* **types:** move @comfyorg/comfyui-frontend-types to ^1.60.0 ([#94](https://github.com/laurigates/comfyui-touch-manager/issues/94)) ([e9dfacf](https://github.com/laurigates/comfyui-touch-manager/commit/e9dfacf88945d9ed9334bbc0b5e61af12c2d2614))
+
 ## [0.1.25](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.24...comfyui-touch-manager-v0.1.25) (2026-10-23)
 
 

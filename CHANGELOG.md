@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.27](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.26...comfyui-touch-manager-v0.1.27) (2026-11-26)
+
+
+### Bug Fixes
+
+* **deps:** update dependency playwright to v1.55.1 [security] ([#87](https://github.com/laurigates/comfyui-touch-manager/issues/87)) ([0d95dbd](https://github.com/laurigates/comfyui-touch-manager/commit/0d95dbd68d89421697c98225614309e583a7cf80))
+
+
+### Miscellaneous
+
+* **claude:** reconcile Claude Code config with the repo baseline ([#91](https://github.com/laurigates/comfyui-touch-manager/issues/91)) ([8dbd83c](https://github.com/laurigates/comfyui-touch-manager/commit/8dbd83c5224063d76c42d45e273c442866a679b2))
+* **deps:** update dependency virtualenv to v21.14.10 [security] ([#96](https://github.com/laurigates/comfyui-touch-manager/issues/96)) ([abda476](https://github.com/laurigates/comfyui-touch-manager/commit/abda476904ba5769087b9e36cfea5c1d9aa0e6c7))
+
 ## [0.1.26](https://github.com/laurigates/comfyui-touch-manager/compare/comfyui-touch-manager-v0.1.25...comfyui-touch-manager-v0.1.26) (2026-11-16)
 
 
